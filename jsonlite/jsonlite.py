@@ -100,7 +100,7 @@ class JSONlite:
         next_id = max(ids) + 1 if ids else 1
         return next_id
 
-    def _match_filter(self, filter: Dict, record: Dict, deep: int = 0) -> bool:
+    def _match_filter(self, filter: Dict, record: Dict, deep: int = 0) -> bool:  # noqa: C901
         # fuck regex
         # convert {"$regex": "a", "$options": "i"} to {new_regex_op: "a"}
         if "$regex" in filter and "$options" in filter:
