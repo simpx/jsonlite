@@ -4,6 +4,7 @@ import pathlib
 import types
 import jsonlite
 
+
 class MongoClientAdapter:
     def __init__(self, uri, *args, **kwargs):
         if uri.startswith('jsonlite://'):
@@ -34,7 +35,7 @@ class DatabaseAdapter:
 class CollectionAdapter:
     def __init__(self, collection_path):
         self.collection = jsonlite.JSONlite(collection_path)
-        
+
     def insert_one(self, document):
         return self.collection.insert_one(document)
 
@@ -64,7 +65,9 @@ class CollectionAdapter:
             self.collection._filename.unlink()
         print(f"Collection {self.collection._filename} dropped")
 
+
 def monkey_patch():
+    import importlib.machinery
     import sys
     import types
 
@@ -73,19 +76,18 @@ def monkey_patch():
             if fullname == "pymongo":
                 return self.create_spec(fullname)
             return None
-        
+
         def create_spec(self, name):
-            loader = PymongoLoader(name)
-            return types.ModuleSpec(name, loader)
+            loader = PymongoLoader()
+            return importlib.machinery.ModuleSpec(name, loader)
 
     class PymongoLoader:
         def create_module(self, spec):
             module = types.ModuleType(spec.name)
             module.MongoClient = MongoClientAdapter
             return module
-        
+
         def exec_module(self, module):
             pass
 
     sys.meta_path.insert(0, PymongoFinder())
-
