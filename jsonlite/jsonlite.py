@@ -5,24 +5,29 @@ import re
 import tempfile
 from dataclasses import dataclass
 from functools import wraps
-from typing import List, Dict, Union, Callable
+from typing import List, Dict, Union
+
 
 @dataclass
 class InsertOneResult:
     inserted_id: int
 
+
 @dataclass
 class InsertManyResult:
     inserted_ids: list[int]
+
 
 @dataclass
 class UpdateResult:
     matched_count: int
     modified_count: int
 
+
 @dataclass
 class DeleteResult:
     deleted_count: int
+
 
 class JSONlite:
     def __init__(self, filename: str):
@@ -40,7 +45,7 @@ class JSONlite:
 
     def _load_database(self, file):
         file.seek(0)
-        if not file.read(1): # init database if file is empty
+        if not file.read(1):  # init database if file is empty
             self._database = {"data": []}
         else:
             file.seek(0)
@@ -51,7 +56,7 @@ class JSONlite:
         json.dump(self._database, file, ensure_ascii=False, indent=4)
         file.flush()
         os.fsync(file.fileno())
-    
+
     def _synchronized_write(method):
         @wraps(method)
         def wrapper(instance, *args, **kwargs):
@@ -66,8 +71,8 @@ class JSONlite:
                             if inode_before == inode_after:
                                 instance._load_database(file)
                                 result = method(instance, *args, **kwargs)
-                                with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(filename),
-                                    mode='w', encoding='utf-8') as temp_file:
+                                with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(filename), mode='w',
+                                                                 encoding='utf-8') as temp_file:
                                     instance._save_database(temp_file)
                                 os.rename(temp_file.name, filename)
                                 return result
@@ -78,7 +83,8 @@ class JSONlite:
     def _synchronized_read(method):
         @wraps(method)
         def wrapper(instance, *args, **kwargs):
-            # No need to lock cause it's read-only, and writes are atomic with os.rename
+            # No need to lock cause it's read-only, and writes are atomic with
+            # os.rename
             filename = instance._filename
             with open(filename, 'r', encoding='utf-8') as file:
                 instance._load_database(file)
@@ -93,29 +99,35 @@ class JSONlite:
         ids = [item["_id"] for item in self._data if "_id" in item]
         next_id = max(ids) + 1 if ids else 1
         return next_id
-    
+
     def _match_filter(self, filter: Dict, record: Dict, deep: int = 0) -> bool:
         # fuck regex
         # convert {"$regex": "a", "$options": "i"} to {new_regex_op: "a"}
         if "$regex" in filter and "$options" in filter:
             options = filter.pop("$options")
-            new_regex_op = lambda v, c: self.operators["$regex"](v, c, options)
+
+            def new_regex_op(v, c):
+                return self.operators["$regex"](v, c, options)
             filter[new_regex_op] = filter.pop("$regex")
         for key, condition in filter.items():
             if key == '$or':
-                if not any(self._match_filter(sub_filter, record, deep + 1) for sub_filter in condition):
+                if not any(self._match_filter(sub_filter, record, deep + 1)
+                           for sub_filter in condition):
                     return False
             elif key == '$and':
-                if not all(self._match_filter(sub_filter, record, deep + 1) for sub_filter in condition):
+                if not all(self._match_filter(sub_filter, record, deep + 1)
+                           for sub_filter in condition):
                     return False
             elif key == '$nor':
-                if any(self._match_filter(sub_filter, record, deep + 1) for sub_filter in condition):
+                if any(self._match_filter(sub_filter, record, deep + 1)
+                       for sub_filter in condition):
                     return False
             elif key == '$not':
                 if self._match_filter(condition, record, deep + 1):
                     return False
             elif isinstance(condition, dict) and len(condition) > 1:
-                if not all(self._match_filter({key: {k: v}}, record, deep+1) for k, v in condition.items()):
+                if not all(self._match_filter(
+                        {key: {k: v}}, record, deep + 1) for k, v in condition.items()):
                     return False
             else:
                 # {key: {operator: cond_value} } cond_value MUST NOT be dict
@@ -125,13 +137,15 @@ class JSONlite:
                     (operator, cond_value), = condition.items()
                     function = None
                     if operator == "$ne":
-                        if self._match_filter({key: {"$eq": cond_value}}, record, deep+1):
+                        if self._match_filter(
+                                {key: {"$eq": cond_value}}, record, deep + 1):
                             return False
                     elif operator == "$exists":
                         if bool(cond_value) != (key in record):
                             return False
                     elif operator == "$not":
-                        if self._match_filter({key: cond_value}, record, deep+1):
+                        if self._match_filter(
+                                {key: cond_value}, record, deep + 1):
                             return False
                     elif operator in self.operators:
                         function = self.operators[operator]
@@ -156,7 +170,8 @@ class JSONlite:
     @_synchronized_write
     def _insert_one(self, record: Dict) -> int:
         if "_id" in record:
-            raise ValueError("ID should not be specified. It is auto-generated.")
+            raise ValueError(
+                "ID should not be specified. It is auto-generated.")
         record = record.copy()
         record["_id"] = self._generate_id()
         self._data.append(record)
@@ -166,10 +181,13 @@ class JSONlite:
         return InsertOneResult(inserted_id=self._insert_one(record))
 
     def insert_many(self, records: List[Dict]) -> InsertManyResult:
-        return InsertManyResult(inserted_ids=[self._insert_one(r) for r in records])
+        return InsertManyResult(
+            inserted_ids=[
+                self._insert_one(r) for r in records])
 
     @_synchronized_write
-    def _update(self, filter: Dict, update_values: Dict, update_all: bool = False) -> UpdateResult:
+    def _update(self, filter: Dict, update_values: Dict,
+                update_all: bool = False) -> UpdateResult:
         matched_count = 0
         modified_count = 0
         for idx, record in enumerate(self._data):
@@ -187,8 +205,10 @@ class JSONlite:
                     self._data[idx] = new_record
                 if not update_all:
                     break
-        return UpdateResult(matched_count=matched_count, modified_count=modified_count)
-    
+        return UpdateResult(
+            matched_count=matched_count,
+            modified_count=modified_count)
+
     def update_one(self, filter: Dict, update_values: Dict) -> UpdateResult:
         return self._update(filter, update_values, update_all=False)
 
@@ -211,7 +231,7 @@ class JSONlite:
     def find_one(self, filter: Dict = {}) -> Union[Dict, None]:
         records = self._find(filter, find_all=False)
         return records[0] if records else None
-    
+
     def find(self, filter: Dict = {}) -> List[Dict]:
         return self._find(filter, find_all=True)
 
@@ -221,7 +241,7 @@ class JSONlite:
         if filter == {} and delete_all:
             # fastpath
             deleted_count = len(self._data)
-            self._data.clear() # _data是一个引用，不能直接_data = []
+            self._data.clear()  # _data是一个引用，不能直接_data = []
         else:
             idx = 0
             while idx < len(self._data):
