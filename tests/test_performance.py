@@ -1,67 +1,58 @@
-import unittest
+# tests/test_performance.py
+
+import pytest
 import tempfile
 import os
-import timeit
-import re
 from jsonlite import JSONlite
 
-class TestJSONlite(unittest.TestCase):
-    def setUp(self):
-        self.temp_file = tempfile.NamedTemporaryFile(delete=False, mode="w+", encoding="utf-8")
-        self.filename = self.temp_file.name
-        self.db = JSONlite(self.filename)
-        self.db2 = JSONlite(self.filename)
-        self.db.insert_many([
-            {'name': 'Alice', 'age': 30}, #
-            {'name': 'Bob', 'age': 25}, #
-            {'name': 'Charlie', 'age': 20}, #
-            {"name": "David", "age": 40, "value": 2},
-            {"name": "Eve", "age": None, "value": 2}, #
-            {"name": "Frank"}  # Missing age
-            ])
+@pytest.fixture
+def temp_db():
+    temp_file = tempfile.NamedTemporaryFile(delete=False, mode="w+", encoding="utf-8")
+    filename = temp_file.name
+    db = JSONlite(filename)
+    db.insert_many([
+        {'name': 'Alice', 'age': 30},
+        {'name': 'Bob', 'age': 25},
+        {'name': 'Charlie', 'age': 20},
+        {"name": "David", "age": 40, "value": 2},
+        {"name": "Eve", "age": None, "value": 2},
+        {"name": "Frank"}  # Missing age
+    ])
+    yield db
+    temp_file.close()
+    os.remove(filename)
 
-    def tearDown(self):
-        try:
-            self.temp_file.close()
-            os.remove(self.filename)
-        except OSError as e:
-            print(f"Error: {e.strerror}")
+# 使用 pytest-benchmark 进行性能测试
+def test_insert_one(benchmark, temp_db):
+    db = temp_db
+    record = {'name': 'SingleUser', 'age': 30}
+    benchmark(db.insert_one, record)
 
-    def _measure_performance(self, query_function, num_iterations=1, *args, **kwargs):
-        total_time = 0
-        start_time = timeit.default_timer()
-        for _ in range(num_iterations):
-            query_function(*args, **kwargs)
-        end_time = timeit.default_timer()
-        return (end_time - start_time) / num_iterations
+def test_insert_many(benchmark, temp_db):
+    db = temp_db
+    records = [{'name': f'User{i}', 'age': i % 100} for i in range(100)]
+    benchmark(db.insert_many, records)
 
-    def test_performance(self):
-        records = [{'name': f'User{i}', 'age': i % 100} for i in range(100)]
-        self.db.insert_many(records)
+def test_find_one(benchmark, temp_db):
+    db = temp_db
+    benchmark(db.find_one, {'name': 'User10'})
 
-        # Test Insert Performance
-        single_insert_time = self._measure_performance(self.db.insert_one, 100, {'name': 'SingleUser', 'age': 30}) * 1000
-        print(f"Insert One Record Average Time: {single_insert_time:.6f} ms")
-        multiple_insert_time = self._measure_performance(self.db.insert_many, 10, records) * 1000
-        print(f"Insert Multiple Records Average Time: {multiple_insert_time:.6f} ms")
+def test_find(benchmark, temp_db):
+    db = temp_db
+    benchmark(db.find, {'age': {"$gt": 50}})
 
-        # Test Find Performance
-        find_single_time = self._measure_performance(self.db.find, 100, {'name': 'User10'}) * 1000
-        print(f"Find Single Record Average Time: {find_single_time:.6f} ms")
-        find_multiple_time = self._measure_performance(self.db.find, 10, {'age': {"$gt": 50}}) * 1000
-        print(f"Find Multiple Records Average Time: {find_multiple_time:.6f} ms")
+def test_update_one(benchmark, temp_db):
+    db = temp_db
+    benchmark(db.update_one, {'name': 'Alice'}, {'$set': {'age': 31}})
 
-        # Test Update Performance
-        update_single_time = self._measure_performance(self.db.update_one, 100, {'name': 'Alice'}, {'$set': {'age': 31}}) * 1000
-        print(f"Update One Record Average Time: {update_single_time:.6f} ms")
-        update_multiple_time = self._measure_performance(self.db.update_many, 10, {'age': {"$gt": 50}}, {'$set': {'name': 'Updated'}}) * 1000
-        print(f"Update Multiple Records Average Time: {update_multiple_time:.6f} ms")
+def test_update_many(benchmark, temp_db):
+    db = temp_db
+    benchmark(db.update_many, {'age': {"$gt": 50}}, {'$set': {'name': 'Updated'}})
 
-        # Test Delete Performance
-        delete_single_time = self._measure_performance(self.db.delete_one, 100, {'name': 'Alice'}) * 1000
-        print(f"Delete One Record Average Time: {delete_single_time:.6f} ms")
-        delete_all_time = self._measure_performance(self.db.delete_many, 100, {}) * 1000
-        print(f"Delete All Records Average Time: {delete_all_time:.6f} ms")
+def test_delete_one(benchmark, temp_db):
+    db = temp_db
+    benchmark(db.delete_one, {'name': 'Alice'})
 
-if __name__ == '__main__':
-    unittest.main()
+def test_delete_all(benchmark, temp_db):
+    db = temp_db
+    benchmark(db.delete_many, {})
