@@ -99,6 +99,8 @@ Alternatively, you can patch pymongo to use JSONlite and interact with JSON file
 
 >>> pymongo_patch()
 
+>>> from pymongo import MongoClient
+
 >>> client = MongoClient('jsonlite://database')
 >>> db = client.test_database
 >>> collection = db.test_collection
