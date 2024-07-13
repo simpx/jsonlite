@@ -2,7 +2,8 @@ from setuptools import setup, find_packages
 
 setup(
     name='jsonlite',
-    version='0.0.5',
+    use_scm_version=True,
+    setup_requires=['setuptools_scm'],
     packages=find_packages(),
     include_package_data=True,
     description='A lightweight local JSON database',
@@ -10,7 +11,7 @@ setup(
     long_description_content_type='text/markdown',
     author='simpx',
     author_email='simpxx@gmail.com',
-    url='',
+    url='https://github.com/simpx/jsonlite',
     license='MIT',
     install_requires=[],
     classifiers=[
