@@ -4,18 +4,23 @@ import os
 import re
 from jsonlite import JSONlite
 
+
 def mod(value, a, b):
     return value is not None and value % a == b
+
 
 def is_multiple_of(value, match_value):
     return value is not None and value % match_value == 0
 
+
 def is_between(value, min_value, max_value):
     return min_value < value < max_value
 
+
 @pytest.fixture
 def temp_db():
-    temp_file = tempfile.NamedTemporaryFile(delete=False, mode="w+", encoding="utf-8")
+    temp_file = tempfile.NamedTemporaryFile(
+        delete=False, mode="w+", encoding="utf-8")
     filename = temp_file.name
     db = JSONlite(filename)
     db2 = JSONlite(filename)
@@ -31,6 +36,7 @@ def temp_db():
     temp_file.close()
     os.remove(filename)
 
+
 def assert_equal_without_id(a, b):
     def remove_id_fields(d):
         if isinstance(d, dict):
@@ -41,11 +47,13 @@ def assert_equal_without_id(a, b):
             return d
     assert remove_id_fields(a) == remove_id_fields(b)
 
+
 def test_new_db():
     filename = 'jsondb_test_db2.json'
-    db = JSONlite(filename)
+    JSONlite(filename)
     assert os.path.exists(filename)
     os.remove(filename)
+
 
 def test_insert_one(temp_db):
     db, db2, _ = temp_db
@@ -54,11 +62,13 @@ def test_insert_one(temp_db):
     found = db2.find_one({'_id': result.inserted_id})
     assert_equal_without_id(found, record)
 
+
 def test_insert_with_id(temp_db):
     db, _, _ = temp_db
     record = {'_id': 10, 'name': 'Dave', 'age': 40}
     with pytest.raises(ValueError, match="ID should not be specified. It is auto-generated."):
         db.insert_one(record)
+
 
 def test_insert_many(temp_db):
     db, db2, _ = temp_db
@@ -67,8 +77,10 @@ def test_insert_many(temp_db):
         {'name': 'Jim', 'age': 15}
     ]
     result = db.insert_many(records)
-    found = db2.find({"$or": [{"_id": inserted_id} for inserted_id in result.inserted_ids]})
+    found = db2.find({"$or": [{"_id": inserted_id}
+                     for inserted_id in result.inserted_ids]})
     assert_equal_without_id(records, found)
+
 
 def test_find_one(temp_db):
     db, _, _ = temp_db
@@ -76,12 +88,14 @@ def test_find_one(temp_db):
     assert result is not None
     assert result['name'] == 'Alice'
 
+
 def test_find(temp_db):
     db, _, _ = temp_db
     result = db.find({'name': 'Alice'})
     assert len(result) == 1
     for record in result:
         assert record['name'] == 'Alice'
+
 
 @pytest.mark.parametrize("name, query, expected_count, condition", [
     ("all", {}, 6, lambda r: True),
@@ -151,6 +165,7 @@ def test_find_testsuits(name, query, expected_count, condition, temp_db):
     for record in result:
         assert condition(record)
 
+
 def test_update_one(temp_db):
     db, db2, _ = temp_db
     found = db.find_one({'name': 'Alice'})
@@ -161,6 +176,7 @@ def test_update_one(temp_db):
     found["name"] = "Alicia"
     assert found == found2
 
+
 def test_update_replace(temp_db):
     db, db2, _ = temp_db
     found = db.find_one({'name': 'Alice'})
@@ -170,6 +186,7 @@ def test_update_replace(temp_db):
     found2 = db2.find_one({'_id': found["_id"]})
     assert_equal_without_id({'name': 'Alicia'}, found2)
 
+
 def test_update_many(temp_db):
     db, db2, _ = temp_db
     # updated
@@ -178,16 +195,17 @@ def test_update_many(temp_db):
     assert result.modified_count == 3
     found = db2.find({'name': 'Alicia'})
     assert len(found) == 3
-    
+
     # not exists
     result = db.update_many({'age': {"$gt": 80}}, {"$set": {'name': 'Alicia'}})
     assert result.matched_count == 0
     assert result.modified_count == 0
-    
+
     # duplicate update
     result = db.update_many({'age': {"$lt": 30}}, {"$set": {'name': 'Alicia'}})
     assert result.matched_count == 2
     assert result.modified_count == 1
+
 
 def test_update_by_id(temp_db):
     db, _, _ = temp_db
@@ -196,24 +214,27 @@ def test_update_by_id(temp_db):
     assert result.matched_count == 1
     assert result.modified_count == 1
 
+
 def test_delete_one(temp_db):
     db, _, _ = temp_db
     result = db.delete_one({'name': 'Alice'})
     assert result.deleted_count == 1
+
 
 def test_delete_many(temp_db):
     db, db2, _ = temp_db
     # delete non-exist
     result = db.delete_many({'name': 'Nonexistent'})
     assert result.deleted_count == 0
-    
+
     # delete all
     result = db.delete_many({})
     assert result.deleted_count == 6
     assert len(db2.find({})) == 0
 
+
 def test_delete_by_id(temp_db):
     db, db2, _ = temp_db
     record = db.find_one({'name': 'Alice', 'age': 30})
-    result = db.delete_one({"_id": record['_id']})
+    db.delete_one({"_id": record['_id']})
     assert db2.find_one({"_id": record['_id']}) is None
