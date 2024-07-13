@@ -32,7 +32,10 @@ pip install jsonlite
 }
 ```
 
-## Usage
+## Direct Usage
+
+You can use JSONlite directly to perform CRUD operations.
+
 
 ```python
 >>> from jsonlite import JSONlite
@@ -86,4 +89,20 @@ pip install jsonlite
 >>> result = db.delete_many({"age": {"$lt": 30}})
 >>> result.deleted_count
 2
+```
+
+## Patching pymongo to use JSONlite
+Alternatively, you can patch pymongo to use JSONlite and interact with JSON files as if you were using MongoDB. This allows you to use the familiar pymongo API with JSON data.
+
+```python
+>>> from jsonlite import pymongo_patch
+
+>>> pymongo_patch()
+
+>>> client = MongoClient('jsonlite://database')
+>>> db = client.test_database
+>>> collection = db.test_collection
+>>> insert_result = collection.insert_one({"name": "Alice", "age": 30})
+>>> # Just like using pymongo
+>>> collection.drop()
 ```

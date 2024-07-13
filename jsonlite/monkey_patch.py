@@ -66,7 +66,7 @@ class CollectionAdapter:
         print(f"Collection {self.collection._filename} dropped")
 
 
-def monkey_patch():
+def pymongo_patch():
     import importlib.machinery
     import sys
     import types
