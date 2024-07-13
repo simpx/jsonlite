@@ -11,7 +11,7 @@ JSONLite is a lightweight, local JSON database for simple data storage.
 pip install jsonlite
 ```
 
-## Data Layout
+## Data Layout in json file
 
 ```json
 {
