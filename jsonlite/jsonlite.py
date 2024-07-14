@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from functools import wraps
 from typing import List, Dict, Union
+from datetime import datetime
 
 
 @dataclass
@@ -43,17 +44,32 @@ class JSONlite:
         if not os.path.exists(filename):
             self._touch_database()
 
+    def _default_serializer(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
+
+    def _object_hook(self, dct):
+        for key, value in dct.items():
+            if isinstance(value, str):
+                try:
+                    dct[key] = datetime.fromisoformat(value)
+                except ValueError:
+                    # Not an ISO format datetime string, ignore
+                    pass
+        return dct
+
     def _load_database(self, file):
         file.seek(0)
         if not file.read(1):  # init database if file is empty
             self._database = {"data": []}
         else:
             file.seek(0)
-            self._database = json.load(file)
+            self._database = json.load(file, object_hook=self._object_hook)
         self._data = self._database["data"]
 
     def _save_database(self, file):
-        json.dump(self._database, file, ensure_ascii=False, indent=4)
+        json.dump(self._database, file, ensure_ascii=False, indent=4, default=self._default_serializer)
         file.flush()
         os.fsync(file.fileno())
 
@@ -100,14 +116,15 @@ class JSONlite:
         next_id = max(ids) + 1 if ids else 1
         return next_id
 
-    def _match_filter(self, filter: Dict, record: Dict, deep: int = 0) -> bool:  # noqa: C901
+    def _match_filter(self, filter: Dict, record: Dict, deep: int = 0) -> bool:
         # fuck regex
         # convert {"$regex": "a", "$options": "i"} to {new_regex_op: "a"}
         if "$regex" in filter and "$options" in filter:
             options = filter.pop("$options")
 
-            def new_regex_op(v, c):
-                return self.operators["$regex"](v, c, options)
+            def new_regex_op( v, c): 
+                return self.operators["$regex"](
+                v, c, options)
             filter[new_regex_op] = filter.pop("$regex")
         for key, condition in filter.items():
             if key == '$or':
