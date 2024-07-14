@@ -1,9 +1,30 @@
 # JSONLite
 
-JSONLite is a lightweight, local JSON database for simple data storage.
+![Build Status](https://img.shields.io/github/actions/workflow/status/simpx/jsonlite/python-package.yml)
+![PyPI](https://img.shields.io/pypi/v/jsonlite)
+![License](https://img.shields.io/github/license/simpx/jsonlite)
+![Issues](https://img.shields.io/github/issues/simpx/jsonlite)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
-- Like SQLite, it's a local database
-- It's API is 100% modeled after MongoDB, making it easy to migrate between MongoDB and JSONLite
+JSONLite is a lightweight, local JSON database for simple data storage.
+- Like SQLite, it's a local database.
+- Its API is 100% modeled after MongoDB, making it easy to migrate between MongoDB and JSONLite.
+
+## Features
+
+- Zero dependency
+- Store JSON data locally
+- MongoDB-like API, Compatible with pymongo
+- Allows multiple processes to read/write concurrently
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Data Layout](#data-layout-in-json-file)
+  - [Direct Usage](#direct-usage)
+  - [Patching pymongo](#patching-pymongo-to-use-jsonlite)
+- [License](#license)
 
 ## Installation
 
@@ -108,3 +129,7 @@ Alternatively, you can patch pymongo to use JSONlite and interact with JSON file
 >>> # Just like using pymongo
 >>> collection.drop()
 ```
+
+# License
+
+JSONLite is licensed under the MIT License. See the [LICENSE](LICENSE) file for more information.
