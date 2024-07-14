@@ -1,16 +1,25 @@
 import pytest
 from jsonlite import pymongo_patch
 
-# Apply the pymongo patch to use JSONlite
+# Apply the pymongo patch to use JSONlite before importing pymongo
 pymongo_patch()
 
 from pymongo import MongoClient
+import shutil
+import pathlib
 
-@pytest.fixture
+@pytest.fixture(scope='module')
 def client():
-    return MongoClient('jsonlite://test_database')
+    client = MongoClient('jsonlite://test_database')
+    try:
+        yield client
+    finally:
+        # Clean up the test_database folder
+        db_path = pathlib.Path('test_database')
+        if db_path.exists() and db_path.is_dir():
+            shutil.rmtree(db_path)
 
-@pytest.fixture
+@pytest.fixture(scope='function')
 def collection(client):
     db = client.test_database
     collection = db.test_collection
