@@ -3,10 +3,12 @@ import fcntl
 import os
 import re
 import tempfile
+import base64
 from dataclasses import dataclass
 from functools import wraps
 from typing import List, Dict, Union
 from datetime import datetime
+from decimal import Decimal
 
 
 @dataclass
@@ -46,17 +48,21 @@ class JSONlite:
 
     def _default_serializer(self, obj):
         if isinstance(obj, datetime):
-            return obj.isoformat()
+            return {'_type': 'datetime', 'value': obj.isoformat()}
+        elif isinstance(obj, Decimal):
+            return {'_type': 'decimal', 'value': str(obj)}
+        elif isinstance(obj, bytes):
+            return {'_type': 'binary', 'value': base64.b64encode(obj).decode('utf-8')}
         raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
 
     def _object_hook(self, dct):
-        for key, value in dct.items():
-            if isinstance(value, str):
-                try:
-                    dct[key] = datetime.fromisoformat(value)
-                except ValueError:
-                    # Not an ISO format datetime string, ignore
-                    pass
+        if '_type' in dct:
+            if dct['_type'] == 'datetime':
+                return datetime.fromisoformat(dct['value'])
+            elif dct['_type'] == 'decimal':
+                return Decimal(dct['value'])
+            elif dct['_type'] == 'binary':
+                return base64.b64decode(dct['value'])
         return dct
 
     def _load_database(self, file):

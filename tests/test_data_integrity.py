@@ -3,6 +3,7 @@ from jsonlite import JSONlite
 import shutil
 import pathlib
 from datetime import datetime
+from decimal import Decimal
 
 @pytest.fixture(scope='module')
 def db():
@@ -33,6 +34,8 @@ def test_data_integrity_across_various_types(db, clear_db):
         "float": 123.456,
         "string": "Hello, world!",
         "datetime": datetime(2023, 1, 1, 12, 0, 0),
+        "decimal": Decimal('123.456'),
+        "binary": b'\x00\x01\x02\x03\x04',
         "long_text": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 10,
         "markdown": "# Title\n\nSome **bold** text and _italic_ text.\n\n- List item 1\n- List item 2",
         "boolean_true": True,
@@ -55,3 +58,7 @@ def test_data_integrity_across_various_types(db, clear_db):
 
     # Ensure that the retrieved data matches the original data
     assert_documents_equal(test_data, retrieved_data)
+
+if __name__ == "__main__":
+    pytest.main()
+
