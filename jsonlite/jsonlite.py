@@ -190,8 +190,7 @@ class JSONlite:
                         return False
         return True
 
-    @_synchronized_write
-    def _insert_one(self, record: Dict) -> int:
+    def _raw_insert_one(self, record: Dict) -> int:
         if "_id" in record:
             raise ValueError(
                 "ID should not be specified. It is auto-generated.")
@@ -200,6 +199,9 @@ class JSONlite:
         self._data.append(record)
         return record["_id"]
 
+    @_synchronized_write
+    def _insert_one(self, record: Dict) -> int:
+        return self._raw_insert_one(record)
     def insert_one(self, record: Dict) -> InsertOneResult:
         return InsertOneResult(inserted_id=self._insert_one(record))
 
@@ -210,7 +212,7 @@ class JSONlite:
 
     @_synchronized_write
     def _update(self, filter: Dict, update_values: Dict,
-                update_all: bool = False) -> UpdateResult:
+                update_all: bool = False, upsert: bool = False) -> UpdateResult:
         matched_count = 0
         modified_count = 0
         for idx, record in enumerate(self._data):
@@ -228,15 +230,22 @@ class JSONlite:
                     self._data[idx] = new_record
                 if not update_all:
                     break
+        if matched_count == 0 and upsert:
+            upserted_record = filter.copy()
+            if "$set" in update_values:
+                upserted_record.update(update_values["$set"])
+            else:
+                upserted_record.update(update_values)
+            upserted_id = self._raw_insert_one(upserted_record)
+            return UpdateResult(matched_count=0, modified_count=1, upserted_id=upserted_id)
         return UpdateResult(
             matched_count=matched_count,
             modified_count=modified_count)
+    def update_one(self, filter: Dict, update_values: Dict, upsert: bool = False) -> UpdateResult:
+        return self._update(filter, update_values, update_all=False, upsert=upsert)
 
-    def update_one(self, filter: Dict, update_values: Dict) -> UpdateResult:
-        return self._update(filter, update_values, update_all=False)
-
-    def update_many(self, filter: Dict, update_values: Dict) -> UpdateResult:
-        return self._update(filter, update_values, update_all=True)
+    def update_many(self, filter: Dict, update_values: Dict, upsert: bool = False) -> UpdateResult:
+        return self._update(filter, update_values, update_all=True, upsert=upsert)
 
     @_synchronized_read
     def _find(self, filter: Dict, find_all: bool = False) -> List[Dict]:
