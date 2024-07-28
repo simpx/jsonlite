@@ -214,6 +214,42 @@ def test_update_by_id(temp_db):
     assert result.matched_count == 1
     assert result.modified_count == 1
 
+def test_update_one_upsert(temp_db):
+    db, db2, _ = temp_db
+    # Test upsert where a document does not exist
+    result = db.update_one({'name': 'Zoe'}, {"$set": {'age': 23}}, upsert=True)
+    assert result.matched_count == 0
+    assert result.modified_count == 0
+    assert result.upserted_id is not None
+    found = db2.find_one({'_id': result.upserted_id})
+    assert_equal_without_id(found, {'name': 'Zoe', 'age': 23})
+
+    # Test upsert where a document already exists
+    result = db.update_one({'name': 'Zoe'}, {"$set": {'age': 24}}, upsert=True)
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    assert result.upserted_id is None
+    found = db2.find_one({'name': 'Zoe'})
+    assert_equal_without_id(found, {'name': 'Zoe', 'age': 24})
+
+def test_update_many_upsert(temp_db):
+    db, db2, _ = temp_db
+    # Test upsert where no documents match
+    result = db.update_many({'name': 'Nonexistent'}, {"$set": {'age': 100}}, upsert=True)
+    assert result.matched_count == 0
+    assert result.modified_count == 0
+    assert result.upserted_id is not None
+    found = db2.find({'_id': result.upserted_id})
+    assert len(found) == 1
+    assert_equal_without_id(found[0], {'name': 'Nonexistent', 'age': 100})
+
+    # Test upsert where some documents match
+    result = db.update_many({'age': {"$lt": 21}}, {"$set": {'group': 'young'}}, upsert=True)
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    assert result.upserted_id is None
+    found = db2.find({'group': 'young'})
+    assert len(found) == 1
 
 def test_delete_one(temp_db):
     db, _, _ = temp_db

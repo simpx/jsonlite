@@ -6,7 +6,7 @@ import tempfile
 import base64
 from dataclasses import dataclass
 from functools import wraps
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Any, Optional
 from datetime import datetime
 from decimal import Decimal
 
@@ -25,6 +25,7 @@ class InsertManyResult:
 class UpdateResult:
     matched_count: int
     modified_count: int
+    upserted_id: Optional[Any] = None
 
 
 @dataclass
@@ -237,7 +238,7 @@ class JSONlite:
             else:
                 upserted_record.update(update_values)
             upserted_id = self._raw_insert_one(upserted_record)
-            return UpdateResult(matched_count=0, modified_count=1, upserted_id=upserted_id)
+            return UpdateResult(matched_count=0, modified_count=0, upserted_id=upserted_id)
         return UpdateResult(
             matched_count=matched_count,
             modified_count=modified_count)
