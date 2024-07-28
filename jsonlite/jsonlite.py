@@ -247,6 +247,9 @@ class JSONlite:
 
     def update_many(self, filter: Dict, update_values: Dict, upsert: bool = False) -> UpdateResult:
         return self._update(filter, update_values, update_all=True, upsert=upsert)
+    
+    def replace_one(self, filter: Dict, replacement: Dict, upsert: bool = False) -> UpdateResult:
+        return self._update(filter, replacement, update_all=False, upsert=upsert)
 
     @_synchronized_read
     def _find(self, filter: Dict, find_all: bool = False) -> List[Dict]:
@@ -267,6 +270,29 @@ class JSONlite:
 
     def find(self, filter: Dict = {}) -> List[Dict]:
         return self._find(filter, find_all=True)
+
+    @_synchronized_write
+    def find_one_and_delete(self, filter: Dict) -> Optional[Dict]:
+        for idx, record in enumerate(self._data):
+            if self._match_filter(filter, record):
+                return self._data.pop(idx)
+        return None
+
+    def find_one_and_replace(self, filter: Dict, replacement: Dict) -> Optional[Dict]:
+        existing_record = self.find_one(filter)
+        if existing_record:
+            # TODO should consider transaction here
+            # between find and replace
+            self.replace_one(filter, replacement)
+        return existing_record
+
+    def find_one_and_update(self, filter: Dict, update: Dict) -> Optional[Dict]:
+        existing_record = self.find_one(filter)
+        if existing_record:
+            # TODO should consider transaction here
+            # between find and replace
+            self.update_one(filter, update)
+        return existing_record
 
     @_synchronized_write
     def _delete(self, filter: Dict, delete_all: bool = False) -> DeleteResult:
@@ -292,3 +318,23 @@ class JSONlite:
 
     def delete_many(self, filter: Dict) -> DeleteResult:
         return self._delete(filter, delete_all=True)
+
+    @_synchronized_read
+    def count_documents(self, filter: Dict) -> int:
+        return len(self._find(filter, find_all=True))
+
+    @_synchronized_read
+    def estimated_document_count(self) -> int:
+        return len(self._data)
+
+    @_synchronized_read
+    def distinct(self, key: str, filter: Optional[Dict] = None) -> List[Any]:
+        seen = set()
+        distinct_values = []
+        for record in self._data:
+            if filter is None or self._match_filter(filter, record):
+                value = record.get(key)
+                if value not in seen:
+                    seen.add(value)
+                    distinct_values.append(value)
+        return distinct_values

@@ -274,3 +274,75 @@ def test_delete_by_id(temp_db):
     record = db.find_one({'name': 'Alice', 'age': 30})
     db.delete_one({"_id": record['_id']})
     assert db2.find_one({"_id": record['_id']}) is None
+
+def test_replace_one(temp_db):
+    db, db2, _ = temp_db
+    # Test replacing a document that exists
+    result = db.replace_one({'name': 'Alice'}, {'name': 'Alicia', 'age': 35})
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    found = db2.find_one({'name': 'Alicia'})
+    assert_equal_without_id(found, {'name': 'Alicia', 'age': 35})
+
+    # Test replacing a document that does not exist
+    result = db.replace_one({'name': 'Zoe'}, {'name': 'Zoe', 'age': 23})
+    assert result.matched_count == 0
+    assert result.modified_count == 0
+
+def test_find_one_and_delete(temp_db):
+    db, db2, _ = temp_db
+    result = db.find_one_and_delete({'name': 'Alice'})
+    assert result is not None
+    assert result['name'] == 'Alice'
+    remaining = db2.find_one({'name': 'Alice'})
+    assert remaining is None
+
+def test_find_one_and_replace(temp_db):
+    db, db2, _ = temp_db
+    result = db.find_one_and_replace({'name': 'Alice'}, {'name': 'Alicia', 'age': 35})
+    assert result is not None
+    assert result['name'] == 'Alice'
+    found = db2.find_one({'name': 'Alicia'})
+    assert_equal_without_id(found, {'name': 'Alicia', 'age': 35})
+
+def test_find_one_and_update(temp_db):
+    db, db2, _ = temp_db
+    result = db.find_one_and_update({'name': 'Alice'}, {"$set": {'age': 35}})
+    assert result is not None
+    assert result['name'] == 'Alice'
+    found = db2.find_one({'name': 'Alice'})
+    assert found['age'] == 35
+
+def test_count_documents(temp_db):
+    db, _, _ = temp_db
+    count = db.count_documents({'age': {"$gt": 20}})
+    assert count == 3
+
+def test_estimated_document_count(temp_db):
+    db, _, _ = temp_db
+    count = db.estimated_document_count()
+    assert count == 6
+
+def test_distinct(temp_db):
+    db, _, _ = temp_db
+    # 插入一些具有重复name字段的记录
+    db.insert_many([
+        {'name': 'Alice', 'age': 32},
+        {'name': 'Charlie', 'age': 23},
+        {'name': 'Eve', 'age': 50}
+    ])
+
+    distinct_names = db.distinct('name')
+    assert len(distinct_names) == 6  # 总共有6个不同的name
+    assert 'Alice' in distinct_names
+    assert 'Bob' in distinct_names
+    assert 'Charlie' in distinct_names
+    assert 'David' in distinct_names
+    assert 'Eve' in distinct_names
+    assert 'Frank' in distinct_names
+
+    distinct_ages = db.distinct('age', {'age': {"$exists": True}})
+    # 用set来验证distinct_ages的值
+    distinct_ages_set = set(distinct_ages)
+    expected_ages_set = {30, 25, 20, 40, 32, 23, 50, None}
+    assert distinct_ages_set == expected_ages_set
