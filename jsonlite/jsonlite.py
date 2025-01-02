@@ -42,7 +42,9 @@ class JSONlite:
             '$gte': lambda v, c: v is not None and v >= c,
             '$lte': lambda v, c: v is not None and v <= c,
             '$eq': lambda v, c: v == c,
-            '$regex': lambda v, c, o=None: re.search(c, v) is not None
+            '$regex': lambda v, c, o=None: re.search(c, v) is not None,
+            '$in': lambda v, c: v in c,
+            '$all': lambda v, c: isinstance(v, (list, tuple)) and all(item in v for item in c)
         }
         if not os.path.exists(filename):
             self._touch_database()
@@ -181,8 +183,12 @@ class JSONlite:
                         if key not in record:
                             return False
                         if isinstance(cond_value, (list, tuple)):
-                            if not function(record.get(key), *cond_value):
-                                return False
+                            if operator in ['$in', '$all']:
+                                if not function(record.get(key), cond_value):
+                                    return False
+                            else:
+                                if not function(record.get(key), *cond_value):
+                                    return False
                         else:
                             if not function(record.get(key), cond_value):
                                 return False

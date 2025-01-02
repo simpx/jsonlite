@@ -94,3 +94,24 @@ def test_delete_many(collection):
     assert result.deleted_count == 1
     documents = list(collection.find({}))
     assert len(documents) == 1
+
+def test_in_operator(collection):
+    collection.insert_many([
+        {"name": "Alice", "age": 30},
+        {"name": "Bob", "age": 25},
+        {"name": "Charlie", "age": 35}
+    ])
+    documents = list(collection.find({"age": {"$in": [25, 35]}}))
+    assert len(documents) == 2
+    names = {doc["name"] for doc in documents}
+    assert names == {"Bob", "Charlie"}
+
+def test_all_operator(collection):
+    collection.insert_many([
+        {"name": "Alice", "tags": ["python", "javascript"]},
+        {"name": "Bob", "tags": ["python"]},
+        {"name": "Charlie", "tags": ["javascript", "typescript"]}
+    ])
+    documents = list(collection.find({"tags": {"$all": ["python", "javascript"]}}))
+    assert len(documents) == 1
+    assert documents[0]["name"] == "Alice"
