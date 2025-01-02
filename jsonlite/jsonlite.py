@@ -344,3 +344,19 @@ class JSONlite:
                     seen.add(value)
                     distinct_values.append(value)
         return distinct_values
+
+    @_synchronized_read
+    def full_text_search(self, query: str) -> List[Dict]:
+        """Perform a full-text search on the database.
+        
+        Args:
+            query (str): The text to search for.
+        
+        Returns:
+            List[Dict]: A list of documents that contain the query text.
+        """
+        results = []
+        for record in self._data:
+            if any(query in str(value) for value in record.values()):
+                results.append(record)
+        return results

@@ -346,3 +346,23 @@ def test_distinct(temp_db):
     distinct_ages_set = set(distinct_ages)
     expected_ages_set = {30, 25, 20, 40, 32, 23, 50, None}
     assert distinct_ages_set == expected_ages_set
+
+def test_full_text_search(temp_db):
+    db, _, _ = temp_db
+    # 清空数据库
+    db.delete_many({})
+
+    # 插入一些用于全文搜索的记录
+    db.insert_many([
+        {'name': 'Alice', 'description': 'This is a description for Alice'},
+        {'name': 'Bob', 'description': 'This is a description for Bob'},
+        {'name': 'Charlie', 'description': 'This is a description for Charlie'}
+    ])
+
+    # 测试全文搜索
+    results = db.full_text_search('Alice')
+    assert len(results) == 1
+    assert results[0]['name'] == 'Alice'
+
+    results = db.full_text_search('description')
+    assert len(results) == 3
