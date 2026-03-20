@@ -115,7 +115,8 @@
   - 生成性能报告 (docs/BENCHMARK_REPORT.md) ✅
 - [x] **性能优化** 🔥 已完成 (2026-03-21)
   - [x] 批量操作优化 (减少文件 I/O) ✅ insert_many 优化：262x 提升
-  - [x] 查询结果缓存 (LRU cache) ✅ (2026-03-21) - 18 tests passing
+  - [x] 查询结果缓存 (LRU cache) ✅ (2026-03-21) - 202 tests passing
+    - Fixed: Handle callable keys in QueryCache hash function (2026-03-21)
   - [ ] 可选 orjson/ujson 加速序列化 (待实现)
 
 #### 交付物
@@ -202,4 +203,4 @@
 ---
 
 **创建时间**: 2026-03-20  
-**最后更新**: 2026-03-20
+**最后更新**: 2026-03-21
