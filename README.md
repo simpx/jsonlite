@@ -131,6 +131,85 @@ You can use JSONlite directly to perform CRUD operations.
 
 >>> # Multi-field sort
 >>> results = db.find({}).sort([("age", -1), ("name", 1)]).all()
+
+>>> # Atomic find_one_and_update
+>>> result = db.find_one_and_update(
+...     {"name": "Alice"},
+...     {"$set": {"age": 29}},
+...     return_document="after"  # or "before"
+... )
+>>> result
+{'_id': 3, 'name': 'Alice', 'age': 29}
+```
+
+### Update Operators
+
+JSONLite supports MongoDB-style update operators for fine-grained document modifications.
+
+#### Field Update Operators
+
+```python
+>>> # $set - Set field value
+>>> db.update_one({"name": "Alice"}, {"$set": {"age": 30, "status": "active"}})
+
+>>> # $unset - Remove field
+>>> db.update_one({"name": "Alice"}, {"$unset": {"status": ""}})
+
+>>> # $inc - Increment/decrement numeric field
+>>> db.update_one({"name": "Alice"}, {"$inc": {"age": 1, "score": -5}})
+
+>>> # $rename - Rename field
+>>> db.update_one({"name": "Alice"}, {"$rename": {"age": "years_old"}})
+
+>>> # $max - Update only if new value is greater
+>>> db.update_one({"name": "Alice"}, {"$max": {"score": 100}})
+
+>>> # $min - Update only if new value is smaller
+>>> db.update_one({"name": "Alice"}, {"$min": {"score": 0}})
+```
+
+#### Array Update Operators
+
+```python
+>>> # $push - Add element to array
+>>> db.update_one({"name": "Alice"}, {"$push": {"tags": "python"}})
+
+>>> # $push with $each - Add multiple elements
+>>> db.update_one({"name": "Alice"}, {"$push": {"tags": {"$each": ["java", "go"]}}})
+
+>>> # $pull - Remove elements matching condition
+>>> db.update_one({"name": "Alice"}, {"$pull": {"tags": "java"}})
+
+>>> # $pull with operator - Remove by condition
+>>> db.update_one({"name": "Alice"}, {"$pull": {"scores": {"$gte": 60}}})
+
+>>> # $addToSet - Add unique element (no duplicates)
+>>> db.update_one({"name": "Alice"}, {"$addToSet": {"tags": "python"}})  # Won't duplicate
+
+>>> # $pop - Remove first/last element
+>>> db.update_one({"name": "Alice"}, {"$pop": {"tags": 1}})   # Remove last
+>>> db.update_one({"name": "Alice"}, {"$pop": {"tags": -1}})  # Remove first
+
+>>> # $pullAll - Remove multiple specific values
+>>> db.update_one({"name": "Alice"}, {"$pullAll": {"tags": ["java", "go"]}})
+```
+
+#### Nested Field Updates
+
+Use dot notation to update nested fields:
+
+```python
+>>> # Insert document with nested structure
+>>> db.insert_one({"name": "Alice", "address": {"city": "Beijing", "zip": "100000"}})
+
+>>> # Update nested field
+>>> db.update_one({"name": "Alice"}, {"$set": {"address.city": "Shanghai"}})
+
+>>> # Add new nested field
+>>> db.update_one({"name": "Alice"}, {"$set": {"address.country": "China"}})
+
+>>> # Unset nested field
+>>> db.update_one({"name": "Alice"}, {"$unset": {"address.zip": ""}})
 ```
 
 ## Patching pymongo to use JSONlite
