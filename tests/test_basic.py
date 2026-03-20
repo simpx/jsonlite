@@ -78,7 +78,7 @@ def test_insert_many(temp_db):
     ]
     result = db.insert_many(records)
     found = db2.find({"$or": [{"_id": inserted_id}
-                     for inserted_id in result.inserted_ids]})
+                     for inserted_id in result.inserted_ids]}).all()
     assert_equal_without_id(records, found)
 
 

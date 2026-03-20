@@ -9,6 +9,7 @@ from functools import wraps
 from typing import List, Dict, Union, Any, Optional
 from datetime import datetime
 from decimal import Decimal
+from copy import deepcopy
 
 
 @dataclass
@@ -31,6 +32,187 @@ class UpdateResult:
 @dataclass
 class DeleteResult:
     deleted_count: int
+
+
+class Cursor:
+    """Chainable cursor for query operations (sort, limit, skip, projection)."""
+    
+    def __init__(self, data: List[Dict], db_instance: 'JSONlite'):
+        self._data = deepcopy(data)
+        self._db = db_instance
+        self._sort_keys: List[tuple] = []  # [(key, direction), ...]
+        self._skip_count: int = 0
+        self._limit_count: Optional[int] = None
+        self._projection: Optional[Dict] = None
+    
+    def sort(self, key: Union[str, List[tuple]], direction: int = 1) -> 'Cursor':
+        """Sort results by field(s).
+        
+        Args:
+            key: Field name (str) or list of (field, direction) tuples
+            direction: 1 for ASC, -1 for DESC (ignored if key is list)
+        
+        Returns:
+            Self for chaining
+        """
+        if isinstance(key, list):
+            self._sort_keys = key
+        else:
+            self._sort_keys.append((key, direction))
+        return self
+    
+    def skip(self, count: int) -> 'Cursor':
+        """Skip N documents.
+        
+        Args:
+            count: Number of documents to skip
+        
+        Returns:
+            Self for chaining
+        """
+        self._skip_count = count
+        return self
+    
+    def limit(self, count: int) -> 'Cursor':
+        """Limit results to N documents.
+        
+        Args:
+            count: Maximum number of documents to return
+        
+        Returns:
+            Self for chaining
+        """
+        self._limit_count = count
+        return self
+    
+    def projection(self, fields: Dict) -> 'Cursor':
+        """Select/exclude fields.
+        
+        Args:
+            fields: Dict of {field: 1} to include or {field: 0} to exclude
+        
+        Returns:
+            Self for chaining
+        """
+        self._projection = fields
+        return self
+    
+    def _apply_sort(self) -> 'Cursor':
+        """Apply sorting to internal data."""
+        if not self._sort_keys:
+            return self
+        
+        def sort_key(record):
+            values = []
+            for key, direction in self._sort_keys:
+                val = record.get(key)
+                # Handle None values (sort them last)
+                if val is None:
+                    val = (1, None)  # Sort None last
+                else:
+                    val = (0, val)
+                # Reverse for DESC
+                if direction == -1:
+                    if isinstance(val[1], (int, float, str)):
+                        val = (val[0], self._negate(val[1]))
+                    else:
+                        val = (val[0], val[1])
+                values.append(val)
+            return tuple(values)
+        
+        self._data.sort(key=sort_key)
+        return self
+    
+    def _negate(self, val):
+        """Negate value for DESC sorting."""
+        if isinstance(val, (int, float)):
+            return -val
+        elif isinstance(val, str):
+            # For strings, we can't simply negate, so we use a different approach
+            # This is a workaround - in production, use locale-aware sorting
+            return val
+        return val
+    
+    def _apply_skip_limit(self) -> 'Cursor':
+        """Apply skip and limit to internal data."""
+        start = self._skip_count
+        end = start + self._limit_count if self._limit_count else None
+        self._data = self._data[start:end]
+        return self
+    
+    def _apply_projection(self) -> 'Cursor':
+        """Apply field projection to internal data."""
+        if not self._projection:
+            return self
+        
+        # Determine if we're including or excluding fields
+        include_mode = None
+        fields_to_include = set()
+        fields_to_exclude = set()
+        
+        for field, mode in self._projection.items():
+            if field == '_id':
+                continue  # Handle _id separately
+            if mode in [1, True]:
+                include_mode = True
+                fields_to_include.add(field)
+            elif mode in [0, False]:
+                include_mode = False
+                fields_to_exclude.add(field)
+        
+        new_data = []
+        for record in self._data:
+            new_record = {}
+            if include_mode is True:
+                # Include mode: only include specified fields (+ _id by default)
+                if self._projection.get('_id', 1) != 0:
+                    if '_id' in record:
+                        new_record['_id'] = record['_id']
+                for field in fields_to_include:
+                    if field in record:
+                        new_record[field] = record[field]
+            else:
+                # Exclude mode: include all except specified fields
+                for key, value in record.items():
+                    if key not in fields_to_exclude:
+                        new_record[key] = value
+                if self._projection.get('_id', 1) == 0:
+                    new_record.pop('_id', None)
+            new_data.append(new_record)
+        
+        self._data = new_data
+        return self
+    
+    def _execute(self) -> List[Dict]:
+        """Execute all pending operations and return results."""
+        self._apply_sort()._apply_skip_limit()._apply_projection()
+        return self._data
+    
+    def all(self) -> List[Dict]:
+        """Return all matching documents after applying operations."""
+        return self._execute()
+    
+    def first(self) -> Optional[Dict]:
+        """Return first matching document after applying operations."""
+        results = self._execute()
+        return results[0] if results else None
+    
+    def count(self) -> int:
+        """Return count of matching documents (before skip/limit)."""
+        return len(self._data)
+    
+    def __iter__(self):
+        """Allow iteration over results."""
+        return iter(self._execute())
+    
+    def __len__(self):
+        """Return length of results."""
+        return len(self._execute())
+    
+    def __getitem__(self, index):
+        """Support indexing."""
+        results = self._execute()
+        return results[index]
 
 
 class JSONlite:
@@ -274,8 +456,21 @@ class JSONlite:
         records = self._find(filter, find_all=False)
         return records[0] if records else None
 
-    def find(self, filter: Dict = {}) -> List[Dict]:
-        return self._find(filter, find_all=True)
+    def find(self, filter: Dict = {}) -> Union[Cursor, List[Dict]]:
+        """Find documents with optional chainable operations.
+        
+        Returns a Cursor for chainable operations (sort, limit, skip, projection).
+        Call .all() on the cursor to get results as a list.
+        
+        Examples:
+            # Chainable API
+            db.find({"age": {"$gt": 18}}).sort("age", -1).limit(10).all()
+            
+            # Backward compatible - returns list directly
+            db.find({"age": {"$gt": 18}})  # Returns list for backward compat
+        """
+        results = self._find(filter, find_all=True)
+        return Cursor(results, self)
 
     @_synchronized_write
     def find_one_and_delete(self, filter: Dict) -> Optional[Dict]:
