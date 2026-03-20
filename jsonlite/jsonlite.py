@@ -1245,10 +1245,39 @@ class JSONlite:
     def insert_one(self, record: Dict) -> InsertOneResult:
         return InsertOneResult(inserted_id=self._insert_one(record))
 
+    @_synchronized_write
+    def _insert_many(self, records: List[Dict]) -> List[int]:
+        """Internal batch insert - single read/write cycle for all records."""
+        inserted_ids = []
+        for record in records:
+            if "_id" in record:
+                raise ValueError("ID should not be specified. It is auto-generated.")
+            record = record.copy()
+            record["_id"] = self._generate_id()
+            self._data.append(record)
+            inserted_ids.append(record["_id"])
+        return inserted_ids
+    
     def insert_many(self, records: List[Dict]) -> InsertManyResult:
-        return InsertManyResult(
-            inserted_ids=[
-                self._insert_one(r) for r in records])
+        """Insert multiple records in a single batch operation.
+        
+        Optimized to perform only one file read/write cycle regardless of
+        the number of records, significantly improving batch insert performance.
+        
+        Args:
+            records: List of documents to insert
+        
+        Returns:
+            InsertManyResult with list of inserted IDs
+        
+        Example:
+            >>> result = db.insert_many([{'name': 'Alice'}, {'name': 'Bob'}])
+            >>> print(result.inserted_ids)
+            [1, 2]
+        """
+        if not records:
+            return InsertManyResult(inserted_ids=[])
+        return InsertManyResult(inserted_ids=self._insert_many(records))
 
     @_synchronized_write
     def _update(self, filter: Dict, update_values: Dict,
