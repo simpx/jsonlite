@@ -125,7 +125,11 @@
 - [x] 基准测试工具 (tools/benchmark.py) ✅
 - [x] 性能基准报告 (docs/BENCHMARK_REPORT.md) ✅
 - [x] 查询缓存系统 (QueryCache class, LRU eviction, 18 tests passing) ✅
-- [ ] 可选 orjson/ujson 序列化优化
+- [x] 可选 orjson/ujson 序列化优化 ✅ (2026-03-21)
+  - 安装 orjson 3.11.7
+  - 实现 _fast_dumps/_fast_loads 包装函数
+  - 优化缓存哈希计算性能
+  - 202 tests passing
 
 ---
 

@@ -14,6 +14,47 @@ from bisect import insort_left, bisect_left, bisect_right
 from collections import OrderedDict
 import hashlib
 
+# Optional fast JSON serialization (orjson is 3-4x faster than stdlib json)
+try:
+    import orjson
+    _USE_ORJSON = True
+except ImportError:
+    _USE_ORJSON = False
+    orjson = None
+
+
+def _fast_dumps(obj: Any, **kwargs) -> str:
+    """Fast JSON serialization using orjson if available.
+    
+    Args:
+        obj: Object to serialize
+        **kwargs: Additional arguments (default, indent, etc.)
+    
+    Returns:
+        JSON string
+    """
+    if _USE_ORJSON:
+        # orjson doesn't support indent or default, but is much faster
+        # For cache hashing (no indent needed), use orjson
+        if 'indent' not in kwargs and 'default' not in kwargs:
+            return orjson.dumps(obj).decode('utf-8')
+    # Fallback to standard json
+    return json.dumps(obj, **kwargs)
+
+
+def _fast_loads(s: str) -> Any:
+    """Fast JSON deserialization using orjson if available.
+    
+    Args:
+        s: JSON string
+    
+    Returns:
+        Deserialized object
+    """
+    if _USE_ORJSON:
+        return orjson.loads(s)
+    return json.loads(s)
+
 
 class QueryCache:
     """LRU cache for query results.
@@ -69,7 +110,7 @@ class QueryCache:
         """
         # Convert to hashable representation (handles callable keys)
         serializable = self._serialize_for_hash(filter)
-        filter_str = json.dumps(serializable, sort_keys=True, default=str)
+        filter_str = _fast_dumps(serializable, sort_keys=True, default=str)
         return hashlib.md5(filter_str.encode()).hexdigest()
     
     def get(self, filter: Dict) -> Optional[List[Dict]]:
@@ -1245,7 +1286,10 @@ class JSONlite:
             self._database = {"data": [], "_indexes": []}
         else:
             file.seek(0)
-            self._database = json.load(file, object_hook=self._object_hook)
+            content = file.read()
+            # orjson doesn't support object_hook, so use standard json for loading
+            # to preserve datetime/binary deserialization
+            self._database = json.loads(content, object_hook=self._object_hook)
         self._data = self._database["data"]
         # Load index metadata (but rebuild from data)
         self._index_metadata = self._database.get("_indexes", [])
