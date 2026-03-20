@@ -16,6 +16,7 @@ JSONLite is a lightweight, local JSON database for simple data storage.
 - Store JSON data locally
 - MongoDB-like API, Compatible with pymongo
 - Allows multiple processes to read/write concurrently
+- Chainable query API (sort, limit, skip, projection)
 
 ## Table of Contents
 
@@ -110,6 +111,26 @@ You can use JSONlite directly to perform CRUD operations.
 >>> result = db.delete_many({"age": {"$lt": 30}})
 >>> result.deleted_count
 2
+
+>>> # Chainable queries with Cursor API
+>>> # Sort by age descending, skip 1, limit to 2 results
+>>> results = db.find({"age": {"$gte": 20}}).sort("age", -1).skip(1).limit(2).all()
+>>> results
+[
+    {'_id': 3, 'name': 'Alice', 'age': 28},
+    {'_id': 2, 'name': 'Jane Doe', 'age': 25}
+]
+
+>>> # Projection - select only specific fields
+>>> results = db.find({}).projection({"name": 1, "age": 1, "_id": 0}).all()
+>>> results
+[
+    {'name': 'Alice', 'age': 28},
+    {'name': 'Jane Doe', 'age': 25}
+]
+
+>>> # Multi-field sort
+>>> results = db.find({}).sort([("age", -1), ("name", 1)]).all()
 ```
 
 ## Patching pymongo to use JSONlite

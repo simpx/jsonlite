@@ -40,23 +40,23 @@
 **目标**: 完善查询功能，使其更接近 MongoDB API
 
 #### 任务列表
-- [ ] **排序 (sort)** - 支持单字段和多字段排序
+- [x] **排序 (sort)** - 支持单字段和多字段排序
   - `sort(key, direction)` - ASC/DESC
   - 支持多级排序
-- [ ] **限制与跳过 (limit/skip)** - 分页支持
+- [x] **限制与跳过 (limit/skip)** - 分页支持
   - `limit(n)` - 限制返回数量
   - `skip(n)` - 跳过前 N 条
-- [ ] **投影 (projection)** - 字段选择
+- [x] **投影 (projection)** - 字段选择
   - `projection(fields)` - 选择/排除字段
   - 支持嵌套字段投影
-- [ ] **链式 API** - 支持流畅查询
+- [x] **链式 API** - 支持流畅查询
   - `db.find(filter).sort("age", -1).limit(10).skip(5)`
-- [ ] **单元测试** - 为新增功能编写测试
+- [x] **单元测试** - 为新增功能编写测试 (26 tests passing)
 
 #### 交付物
-- [ ] 查询增强功能代码
-- [ ] 测试覆盖率 > 80%
-- [ ] 更新 README 使用示例
+- [x] 查询增强功能代码 (Cursor class)
+- [x] 测试覆盖率 > 80%
+- [x] 更新 README 使用示例
 
 ---
 
