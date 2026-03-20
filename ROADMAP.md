@@ -115,7 +115,7 @@
   - 生成性能报告 (docs/BENCHMARK_REPORT.md) ✅
 - [x] **性能优化** 🔥 已完成 (2026-03-21)
   - [x] 批量操作优化 (减少文件 I/O) ✅ insert_many 优化：262x 提升
-  - [ ] 查询结果缓存 (待实现)
+  - [x] 查询结果缓存 (LRU cache) ✅ (2026-03-21) - 18 tests passing
   - [ ] 可选 orjson/ujson 加速序列化 (待实现)
 
 #### 交付物
@@ -123,7 +123,8 @@
 - [x] 索引系统 (IndexManager class, 自动维护) ✅
 - [x] 基准测试工具 (tools/benchmark.py) ✅
 - [x] 性能基准报告 (docs/BENCHMARK_REPORT.md) ✅
-- [ ] 性能优化实现
+- [x] 查询缓存系统 (QueryCache class, LRU eviction, 18 tests passing) ✅
+- [ ] 可选 orjson/ujson 序列化优化
 
 ---
 
