@@ -13,6 +13,7 @@ from copy import deepcopy
 from bisect import insort_left, bisect_left, bisect_right
 from collections import OrderedDict
 import hashlib
+from contextlib import contextmanager
 
 # Optional fast JSON serialization (orjson is 3-4x faster than stdlib json)
 try:
@@ -21,6 +22,9 @@ try:
 except ImportError:
     _USE_ORJSON = False
     orjson = None
+
+# Import transaction support
+from .transaction import TransactionManager, TransactionError
 
 
 def _fast_dumps(obj: Any, **kwargs) -> str:
@@ -1252,6 +1256,7 @@ class JSONlite:
         }
         self._index_manager = IndexManager()
         self._index_metadata = []
+        self._transaction_manager = TransactionManager(self)
         if not os.path.exists(filename):
             self._touch_database()
         else:
@@ -1305,6 +1310,8 @@ class JSONlite:
         @wraps(method)
         def wrapper(instance, *args, **kwargs):
             filename = instance._filename
+            in_transaction = instance._transaction_manager.is_active()
+            
             while True:
                 with open(filename, 'a'), open(filename, 'r+', encoding='utf-8') as file:
                     fcntl.flock(file, fcntl.LOCK_EX)
@@ -1313,13 +1320,17 @@ class JSONlite:
                             inode_before = os.fstat(file.fileno()).st_ino
                             inode_after = os.fstat(file2.fileno()).st_ino
                             if inode_before == inode_after:
-                                instance._load_database(file)
-                                instance._rebuild_indexes_from_metadata()
+                                # Only reload from disk if not in a transaction
+                                if not in_transaction:
+                                    instance._load_database(file)
+                                    instance._rebuild_indexes_from_metadata()
                                 result = method(instance, *args, **kwargs)
-                                with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(filename), mode='w',
-                                                                 encoding='utf-8') as temp_file:
-                                    instance._save_database(temp_file)
-                                os.rename(temp_file.name, filename)
+                                # Only save to disk if not in a transaction
+                                if not in_transaction:
+                                    with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(filename), mode='w',
+                                                                     encoding='utf-8') as temp_file:
+                                        instance._save_database(temp_file)
+                                    os.rename(temp_file.name, filename)
                                 return result
                     finally:
                         fcntl.flock(file, fcntl.LOCK_UN)
@@ -1330,11 +1341,13 @@ class JSONlite:
         def wrapper(instance, *args, **kwargs):
             # No need to lock cause it's read-only, and writes are atomic with
             # os.rename
-            filename = instance._filename
-            with open(filename, 'r', encoding='utf-8') as file:
-                instance._load_database(file)
-                instance._rebuild_indexes_from_metadata()
-                return method(instance, *args, **kwargs)
+            # Don't reload from disk if we're in a transaction (use in-memory state)
+            if not instance._transaction_manager.is_active():
+                filename = instance._filename
+                with open(filename, 'r', encoding='utf-8') as file:
+                    instance._load_database(file)
+                    instance._rebuild_indexes_from_metadata()
+            return method(instance, *args, **kwargs)
         return wrapper
 
     @_synchronized_write
@@ -1945,3 +1958,57 @@ class JSONlite:
     @_synchronized_read
     def _find(self, filter: Dict, find_all: bool = False) -> List[Dict]:
         return self._find_with_index(filter, find_all)
+    
+    def _save(self) -> None:
+        """Save the database to disk."""
+        with open(self._filename, 'w', encoding='utf-8') as file:
+            self._save_database(file)
+    
+    @contextmanager
+    def transaction(self):
+        """
+        Create a transaction context for atomic multi-operation support.
+        
+        All operations within the context are atomic - either all succeed
+        or all are rolled back on error.
+        
+        Usage:
+            with db.transaction() as txn:
+                db.insert_one({"name": "Alice", "balance": 1000})
+                db.insert_one({"name": "Bob", "balance": 500})
+                # If any operation fails, both inserts are rolled back
+        
+        Raises:
+            TransactionError: If nested transactions are attempted
+        """
+        with self._transaction_manager.transaction() as txn:
+            yield txn
+    
+    def begin_transaction(self) -> 'TransactionContext':
+        """
+        Explicitly begin a transaction (alternative to context manager).
+        
+        Must be followed by commit() or rollback().
+        
+        Usage:
+            txn = db.begin_transaction()
+            try:
+                db.insert_one({...})
+                db.update_one({...})
+                db.commit_transaction()
+            except:
+                db.rollback_transaction()
+        """
+        return self._transaction_manager.begin()
+    
+    def commit_transaction(self) -> None:
+        """Commit the current transaction."""
+        self._transaction_manager.commit()
+    
+    def rollback_transaction(self) -> None:
+        """Rollback the current transaction."""
+        self._transaction_manager.rollback()
+    
+    def in_transaction(self) -> bool:
+        """Check if currently inside a transaction."""
+        return self._transaction_manager.is_active()
