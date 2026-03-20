@@ -6,10 +6,11 @@ import tempfile
 import base64
 from dataclasses import dataclass
 from functools import wraps
-from typing import List, Dict, Union, Any, Optional
+from typing import List, Dict, Union, Any, Optional, Tuple
 from datetime import datetime
 from decimal import Decimal
 from copy import deepcopy
+from bisect import insort_left, bisect_left, bisect_right
 
 
 @dataclass
@@ -520,6 +521,312 @@ class AggregationCursor:
         return self._data[index]
 
 
+class IndexManager:
+    """Manages indexes for JSONlite database.
+    
+    Supports:
+    - Single-field indexes
+    - Compound indexes (multi-field)
+    - Unique indexes
+    - Sparse indexes (only index documents with the field)
+    - Automatic index maintenance on insert/update/delete
+    """
+    
+    def __init__(self):
+        self._indexes: Dict[str, Dict] = {}  # index_name -> {keys, unique, sparse, data}
+    
+    def create_index(self, keys: Union[str, List[Tuple[str, int]]], 
+                     unique: bool = False, 
+                     sparse: bool = False,
+                     name: Optional[str] = None) -> str:
+        """Create an index on specified field(s).
+        
+        Args:
+            keys: Field name (str) or list of (field, direction) tuples
+            unique: If True, enforce uniqueness
+            sparse: If True, only index documents with the field
+            name: Optional index name (auto-generated if not provided)
+        
+        Returns:
+            Index name
+        
+        Examples:
+            create_index("age")  # Single field
+            create_index([("age", 1), ("name", -1)])  # Compound index
+            create_index("email", unique=True)  # Unique index
+            create_index("optional_field", sparse=True)  # Sparse index
+        """
+        # Normalize keys to list of tuples
+        if isinstance(keys, str):
+            keys_list = [(keys, 1)]
+        else:
+            keys_list = keys
+        
+        # Generate index name if not provided
+        if name is None:
+            name_parts = []
+            for field, direction in keys_list:
+                name_parts.append(f"{field}_{direction}")
+            name = "_".join(name_parts)
+        
+        if name in self._indexes:
+            raise ValueError(f"Index '{name}' already exists")
+        
+        self._indexes[name] = {
+            'keys': keys_list,
+            'unique': unique,
+            'sparse': sparse,
+            'data': {}  # value -> list of _id
+        }
+        
+        return name
+    
+    def drop_index(self, name: str) -> bool:
+        """Drop an index by name.
+        
+        Args:
+            name: Index name to drop
+        
+        Returns:
+            True if index was dropped, False if it didn't exist
+        """
+        if name in self._indexes:
+            del self._indexes[name]
+            return True
+        return False
+    
+    def drop_all_indexes(self) -> int:
+        """Drop all indexes.
+        
+        Returns:
+            Number of indexes dropped
+        """
+        count = len(self._indexes)
+        self._indexes.clear()
+        return count
+    
+    def list_indexes(self) -> List[Dict]:
+        """List all indexes.
+        
+        Returns:
+            List of index info dicts
+        """
+        return [
+            {
+                'name': name,
+                'keys': info['keys'],
+                'unique': info['unique'],
+                'sparse': info['sparse']
+            }
+            for name, info in self._indexes.items()
+        ]
+    
+    def get_index(self, name: str) -> Optional[Dict]:
+        """Get index info by name.
+        
+        Args:
+            name: Index name
+        
+        Returns:
+            Index info dict or None if not found
+        """
+        if name in self._indexes:
+            info = self._indexes[name]
+            return {
+                'name': name,
+                'keys': info['keys'],
+                'unique': info['unique'],
+                'sparse': info['sparse']
+            }
+        return None
+    
+    def _get_key_value(self, doc: Dict, keys: List[Tuple[str, int]]) -> Optional[Tuple]:
+        """Extract index key value from document.
+        
+        Args:
+            doc: Document to extract key from
+            keys: List of (field, direction) tuples
+        
+        Returns:
+            Tuple of values or None if any field is missing (for sparse indexes)
+        """
+        values = []
+        for field, direction in keys:
+            value = _get_nested_value(doc, field)
+            if value is None:
+                return None  # Missing field, skip for sparse index
+            values.append(value)
+        return tuple(values) if len(values) > 1 else values[0]
+    
+    def add_document(self, doc: Dict) -> None:
+        """Add a document to all indexes.
+        
+        Args:
+            doc: Document to index
+        """
+        doc_id = doc.get('_id')
+        if doc_id is None:
+            return
+        
+        for name, info in self._indexes.items():
+            if info['sparse']:
+                key_value = self._get_key_value(doc, info['keys'])
+                if key_value is None:
+                    continue  # Skip sparse index for missing field
+            else:
+                key_value = self._get_key_value(doc, info['keys'])
+                if key_value is None:
+                    key_value = None  # Include None values for non-sparse
+            
+            if key_value not in info['data']:
+                info['data'][key_value] = []
+            
+            # Check uniqueness
+            if info['unique'] and doc_id not in info['data'][key_value]:
+                if len(info['data'][key_value]) > 0:
+                    raise ValueError(f"Duplicate key error for index '{name}': {key_value}")
+            
+            if doc_id not in info['data'][key_value]:
+                info['data'][key_value].append(doc_id)
+    
+    def remove_document(self, doc: Dict) -> None:
+        """Remove a document from all indexes.
+        
+        Args:
+            doc: Document to remove
+        """
+        doc_id = doc.get('_id')
+        if doc_id is None:
+            return
+        
+        for name, info in self._indexes.items():
+            key_value = self._get_key_value(doc, info['keys'])
+            if key_value in info['data']:
+                if doc_id in info['data'][key_value]:
+                    info['data'][key_value].remove(doc_id)
+                if len(info['data'][key_value]) == 0:
+                    del info['data'][key_value]
+    
+    def update_document(self, old_doc: Dict, new_doc: Dict) -> None:
+        """Update a document in all indexes.
+        
+        Args:
+            old_doc: Document before update
+            new_doc: Document after update
+        """
+        for name, info in self._indexes.items():
+            old_key = self._get_key_value(old_doc, info['keys'])
+            new_key = self._get_key_value(new_doc, info['keys'])
+            
+            if old_key == new_key:
+                continue  # Index key unchanged
+            
+            doc_id = new_doc.get('_id')
+            
+            # Remove from old position
+            if old_key is not None and old_key in info['data']:
+                if doc_id in info['data'][old_key]:
+                    info['data'][old_key].remove(doc_id)
+                if len(info['data'][old_key]) == 0:
+                    del info['data'][old_key]
+            
+            # Add to new position
+            if new_key is not None or not info['sparse']:
+                if new_key not in info['data']:
+                    info['data'][new_key] = []
+                
+                if info['unique'] and len(info['data'][new_key]) > 0:
+                    raise ValueError(f"Duplicate key error for index '{name}': {new_key}")
+                
+                if doc_id not in info['data'][new_key]:
+                    info['data'][new_key].append(doc_id)
+    
+    def query_index(self, field: str, value: Any) -> Optional[List[int]]:
+        """Query an index for documents matching a field value.
+        
+        Args:
+            field: Field name to query
+            value: Value to match
+        
+        Returns:
+            List of document _ids or None if no suitable index exists
+        """
+        # Find a suitable index
+        for name, info in self._indexes.items():
+            if len(info['keys']) == 1 and info['keys'][0][0] == field:
+                if value in info['data']:
+                    return info['data'][value].copy()
+                return []  # Empty list means no matches
+        return None  # No suitable index
+    
+    def query_index_range(self, field: str, 
+                          min_value: Any = None, 
+                          max_value: Any = None,
+                          min_inclusive: bool = True,
+                          max_inclusive: bool = True) -> Optional[List[int]]:
+        """Query an index for documents in a value range.
+        
+        Args:
+            field: Field name to query
+            min_value: Minimum value (None for no lower bound)
+            max_value: Maximum value (None for no upper bound)
+            min_inclusive: If True, include min_value
+            max_inclusive: If True, include max_value
+        
+        Returns:
+            List of document _ids or None if no suitable index exists
+        """
+        # Find a suitable index
+        for name, info in self._indexes.items():
+            if len(info['keys']) == 1 and info['keys'][0][0] == field:
+                result = []
+                sorted_keys = sorted(info['data'].keys())
+                
+                for key in sorted_keys:
+                    if key is None:
+                        continue
+                    
+                    # Check min bound
+                    if min_value is not None:
+                        if min_inclusive and key < min_value:
+                            continue
+                        if not min_inclusive and key <= min_value:
+                            continue
+                    
+                    # Check max bound
+                    if max_value is not None:
+                        if max_inclusive and key > max_value:
+                            break
+                        if not max_inclusive and key >= max_value:
+                            break
+                    
+                    result.extend(info['data'][key])
+                
+                return result
+        
+        return None  # No suitable index
+    
+    def rebuild_index(self, name: str, documents: List[Dict]) -> None:
+        """Rebuild an index from scratch.
+        
+        Args:
+            name: Index name to rebuild
+            documents: All documents in the collection
+        """
+        if name not in self._indexes:
+            raise ValueError(f"Index '{name}' does not exist")
+        
+        info = self._indexes[name]
+        info['data'] = {}
+        
+        for doc in documents:
+            try:
+                self.add_document(doc)
+            except ValueError:
+                # Re-raise with context
+                raise
+
+
 def _get_nested_value(doc: Dict, path: str) -> Any:
     """Get value from nested document using dot notation."""
     parts = path.split('.')
@@ -758,8 +1065,16 @@ class JSONlite:
             '$in': lambda v, c: v in c,
             '$all': lambda v, c: isinstance(v, (list, tuple)) and all(item in v for item in c)
         }
+        self._index_manager = IndexManager()
+        self._index_metadata = []
         if not os.path.exists(filename):
             self._touch_database()
+        else:
+            # Reload to get index metadata
+            with open(filename, 'r', encoding='utf-8') as file:
+                self._load_database(file)
+            # Rebuild indexes from metadata
+            self._rebuild_indexes_from_metadata()
 
     def _default_serializer(self, obj):
         if isinstance(obj, datetime):
@@ -783,13 +1098,17 @@ class JSONlite:
     def _load_database(self, file):
         file.seek(0)
         if not file.read(1):  # init database if file is empty
-            self._database = {"data": []}
+            self._database = {"data": [], "_indexes": []}
         else:
             file.seek(0)
             self._database = json.load(file, object_hook=self._object_hook)
         self._data = self._database["data"]
+        # Load index metadata (but rebuild from data)
+        self._index_metadata = self._database.get("_indexes", [])
 
     def _save_database(self, file):
+        # Save index metadata
+        self._database["_indexes"] = self._index_manager.list_indexes()
         json.dump(self._database, file, ensure_ascii=False, indent=4, default=self._default_serializer)
         file.flush()
         os.fsync(file.fileno())
@@ -807,6 +1126,7 @@ class JSONlite:
                             inode_after = os.fstat(file2.fileno()).st_ino
                             if inode_before == inode_after:
                                 instance._load_database(file)
+                                instance._rebuild_indexes_from_metadata()
                                 result = method(instance, *args, **kwargs)
                                 with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(filename), mode='w',
                                                                  encoding='utf-8') as temp_file:
@@ -825,6 +1145,7 @@ class JSONlite:
             filename = instance._filename
             with open(filename, 'r', encoding='utf-8') as file:
                 instance._load_database(file)
+                instance._rebuild_indexes_from_metadata()
                 return method(instance, *args, **kwargs)
         return wrapper
 
@@ -1122,3 +1443,199 @@ class JSONlite:
             if any(query in str(value) for value in record.values()):
                 results.append(record)
         return results
+    
+    # ==================== Index Management ====================
+    
+    @_synchronized_write
+    def _create_index_internal(self, keys: Union[str, List[Tuple[str, int]]], 
+                               unique: bool, sparse: bool, name: Optional[str]) -> str:
+        """Internal index creation (with write lock)."""
+        index_name = self._index_manager.create_index(keys, unique, sparse, name)
+        self._index_manager.rebuild_index(index_name, self._data)
+        return index_name
+    
+    def create_index(self, keys: Union[str, List[Tuple[str, int]]], 
+                     unique: bool = False, 
+                     sparse: bool = False,
+                     name: Optional[str] = None) -> str:
+        """Create an index on specified field(s).
+        
+        Args:
+            keys: Field name (str) or list of (field, direction) tuples
+            unique: If True, enforce uniqueness
+            sparse: If True, only index documents with the field
+            name: Optional index name (auto-generated if not provided)
+        
+        Returns:
+            Index name
+        
+        Examples:
+            db.create_index("age")  # Single field
+            db.create_index([("age", 1), ("name", -1)])  # Compound index
+            db.create_index("email", unique=True)  # Unique index
+        """
+        return self._create_index_internal(keys, unique, sparse, name)
+    
+    def drop_index(self, name: str) -> bool:
+        """Drop an index by name.
+        
+        Args:
+            name: Index name to drop
+        
+        Returns:
+            True if index was dropped, False if it didn't exist
+        """
+        return self._index_manager.drop_index(name)
+    
+    def drop_indexes(self) -> int:
+        """Drop all indexes.
+        
+        Returns:
+            Number of indexes dropped
+        """
+        return self._index_manager.drop_all_indexes()
+    
+    def _rebuild_indexes_from_metadata(self) -> None:
+        """Rebuild indexes from saved metadata."""
+        for idx_meta in self._index_metadata:
+            try:
+                self._index_manager.create_index(
+                    idx_meta['keys'],
+                    idx_meta.get('unique', False),
+                    idx_meta.get('sparse', False),
+                    idx_meta['name']
+                )
+                self._index_manager.rebuild_index(idx_meta['name'], self._data)
+            except Exception:
+                # Skip corrupted indexes
+                pass
+    
+    def list_indexes(self) -> List[Dict]:
+        """List all indexes.
+        
+        Returns:
+            List of index info dicts with name, keys, unique, sparse
+        """
+        return self._index_manager.list_indexes()
+    
+    def _insert_one_with_index(self, record: Dict) -> int:
+        """Insert one document and update indexes."""
+        # Check if user provided _id (should be auto-generated)
+        if '_id' in record:
+            raise ValueError("ID should not be specified. It is auto-generated.")
+        # Add _id to record before inserting (so we can use it for indexes)
+        record_with_id = record.copy()
+        record_with_id["_id"] = self._generate_id()
+        self._data.append(record_with_id)
+        # Add to indexes
+        self._index_manager.add_document(record_with_id)
+        return record_with_id["_id"]
+    
+    @_synchronized_write
+    def _insert_one(self, record: Dict) -> int:
+        return self._insert_one_with_index(record)
+    
+    @_synchronized_write
+    def _update_with_index(self, filter: Dict, update_values: Dict,
+                          update_all: bool = False, upsert: bool = False) -> UpdateResult:
+        """Update with index maintenance."""
+        matched_count = 0
+        modified_count = 0
+        
+        has_operators = any(key.startswith('$') for key in update_values.keys())
+        
+        for idx, record in enumerate(self._data):
+            if self._match_filter(filter, record):
+                matched_count += 1
+                old_record = deepcopy(record)
+                
+                if has_operators:
+                    new_record = _apply_update_operators(record, update_values)
+                else:
+                    new_record = update_values.copy()
+                    new_record['_id'] = record.get('_id')
+                
+                if record != new_record:
+                    modified_count += 1
+                    # Update indexes
+                    self._index_manager.update_document(old_record, new_record)
+                    self._data[idx] = new_record
+                
+                if not update_all:
+                    break
+        
+        if matched_count == 0 and upsert:
+            upserted_record = filter.copy()
+            if has_operators:
+                upserted_record = _apply_update_operators(upserted_record, update_values)
+            else:
+                upserted_record.update(update_values)
+            upserted_id = self._insert_one_with_index(upserted_record)
+            return UpdateResult(matched_count=0, modified_count=0, upserted_id=upserted_id)
+        
+        return UpdateResult(matched_count=matched_count, modified_count=modified_count)
+    
+    def update_one(self, filter: Dict, update_values: Dict, upsert: bool = False) -> UpdateResult:
+        return self._update_with_index(filter, update_values, update_all=False, upsert=upsert)
+    
+    def update_many(self, filter: Dict, update_values: Dict, upsert: bool = False) -> UpdateResult:
+        return self._update_with_index(filter, update_values, update_all=True, upsert=upsert)
+    
+    @_synchronized_write
+    def _delete_with_index(self, filter: Dict, delete_all: bool = False) -> DeleteResult:
+        """Delete with index maintenance."""
+        deleted_count = 0
+        if filter == {} and delete_all:
+            # Remove all from indexes
+            for record in self._data:
+                self._index_manager.remove_document(record)
+            deleted_count = len(self._data)
+            self._data.clear()
+        else:
+            idx = 0
+            while idx < len(self._data):
+                if self._match_filter(filter, self._data[idx]):
+                    # Remove from indexes before deleting
+                    self._index_manager.remove_document(self._data[idx])
+                    del self._data[idx]
+                    deleted_count += 1
+                    if not delete_all:
+                        break
+                else:
+                    idx += 1
+        return DeleteResult(deleted_count=deleted_count)
+    
+    def delete_one(self, filter: Dict) -> DeleteResult:
+        return self._delete_with_index(filter, delete_all=False)
+    
+    def delete_many(self, filter: Dict) -> DeleteResult:
+        return self._delete_with_index(filter, delete_all=True)
+    
+    def _find_with_index(self, filter: Dict, find_all: bool = False) -> List[Dict]:
+        """Find using indexes when possible for optimization."""
+        # Try to use index for simple equality filters
+        if len(filter) == 1:
+            field, value = list(filter.items())[0]
+            if not isinstance(value, dict):  # Simple equality, not operator
+                indexed_ids = self._index_manager.query_index(field, value)
+                if indexed_ids is not None:
+                    # Build id -> record map
+                    id_map = {doc['_id']: doc for doc in self._data}
+                    results = [id_map[_id] for _id in indexed_ids if _id in id_map]
+                    return results if find_all else results[:1]
+        
+        # Fall back to full scan
+        if filter == {}:
+            return self._data if find_all else self._data[:1]
+        
+        found_records = []
+        for record in self._data:
+            if self._match_filter(filter, record):
+                found_records.append(record)
+                if not find_all:
+                    break
+        return found_records
+    
+    @_synchronized_read
+    def _find(self, filter: Dict, find_all: bool = False) -> List[Dict]:
+        return self._find_with_index(filter, find_all)
