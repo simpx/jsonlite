@@ -33,6 +33,31 @@ class QueryCache:
         self._hits = 0
         self._misses = 0
     
+    def _serialize_for_hash(self, obj: Any) -> Any:
+        """Convert object to hashable representation.
+        
+        Handles callable keys, nested dicts/lists, and special types.
+        
+        Args:
+            obj: Object to serialize
+        
+        Returns:
+            Hashable representation
+        """
+        if callable(obj):
+            # For callable keys, use function name and id for uniqueness
+            return f"<callable:{obj.__name__}:{id(obj)}>"
+        elif isinstance(obj, dict):
+            # Sort keys and recursively serialize values
+            return {k if not callable(k) else f"<callable:{k.__name__}:{id(k)}>": self._serialize_for_hash(v) 
+                    for k, v in sorted(obj.items(), key=lambda x: str(x[0]))}
+        elif isinstance(obj, (list, tuple)):
+            return [self._serialize_for_hash(item) for item in obj]
+        elif isinstance(obj, (datetime, Decimal)):
+            return str(obj)
+        else:
+            return obj
+    
     def _hash_filter(self, filter: Dict) -> str:
         """Generate consistent hash for a filter dict.
         
@@ -42,8 +67,9 @@ class QueryCache:
         Returns:
             Hex string hash of the filter
         """
-        # Sort keys for consistent hashing
-        filter_str = json.dumps(filter, sort_keys=True, default=str)
+        # Convert to hashable representation (handles callable keys)
+        serializable = self._serialize_for_hash(filter)
+        filter_str = json.dumps(serializable, sort_keys=True, default=str)
         return hashlib.md5(filter_str.encode()).hexdigest()
     
     def get(self, filter: Dict) -> Optional[List[Dict]]:
