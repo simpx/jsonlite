@@ -261,6 +261,11 @@ def _apply_update_operators(record: Dict, update_values: Dict) -> Dict:
     - $rename: Rename fields
     - $max: Update if new value is greater
     - $min: Update if new value is smaller
+    - $push: Add element to array
+    - $pull: Remove elements from array
+    - $addToSet: Add unique element to array
+    - $pop: Remove first/last element from array
+    - $pullAll: Remove multiple elements from array
     
     Args:
         record: The document to update
@@ -312,7 +317,127 @@ def _apply_update_operators(record: Dict, update_values: Dict) -> Dict:
             if current is None or (isinstance(current, (int, float, Decimal)) and value < current):
                 _set_nested_value(new_record, field, value)
     
+    # $push - Add element to array
+    if '$push' in update_values:
+        for field, value in update_values['$push'].items():
+            current = _get_nested_value(new_record, field)
+            if current is None:
+                current = []
+            if isinstance(current, list):
+                current.append(value)
+                _set_nested_value(new_record, field, current)
+    
+    # $pull - Remove elements from array matching condition
+    if '$pull' in update_values:
+        for field, condition in update_values['$pull'].items():
+            current = _get_nested_value(new_record, field)
+            if isinstance(current, list):
+                # Support both simple value and operator conditions
+                if isinstance(condition, dict):
+                    # Operator condition (e.g., {$gt: 5})
+                    filtered = [
+                        item for item in current
+                        if not _matches_pull_condition(item, condition)
+                    ]
+                else:
+                    # Simple value match
+                    filtered = [item for item in current if item != condition]
+                _set_nested_value(new_record, field, filtered)
+    
+    # $addToSet - Add unique element to array
+    if '$addToSet' in update_values:
+        for field, value in update_values['$addToSet'].items():
+            current = _get_nested_value(new_record, field)
+            if current is None:
+                current = []
+            if isinstance(current, list):
+                # Check if value already exists (handle dict comparison)
+                exists = any(_deep_equals(item, value) for item in current)
+                if not exists:
+                    current.append(value)
+                    _set_nested_value(new_record, field, current)
+    
+    # $pop - Remove first or last element from array
+    if '$pop' in update_values:
+        for field, direction in update_values['$pop'].items():
+            current = _get_nested_value(new_record, field)
+            if isinstance(current, list) and len(current) > 0:
+                if direction == 1 or direction == -1:
+                    # 1 = remove last, -1 = remove first
+                    if direction == 1:
+                        current.pop()
+                    else:
+                        current.pop(0)
+                    _set_nested_value(new_record, field, current)
+    
+    # $pullAll - Remove multiple elements from array
+    if '$pullAll' in update_values:
+        for field, values in update_values['$pullAll'].items():
+            current = _get_nested_value(new_record, field)
+            if isinstance(current, list) and isinstance(values, list):
+                filtered = [item for item in current if item not in values]
+                _set_nested_value(new_record, field, filtered)
+    
     return new_record
+
+
+def _matches_pull_condition(item: Any, condition: Dict) -> bool:
+    """Check if an item matches a pull condition (operator dict).
+    
+    Args:
+        item: The array element to check
+        condition: Dict of operators (e.g., {'$gt': 5})
+    
+    Returns:
+        True if item matches the condition
+    """
+    for op, cond_value in condition.items():
+        if op == '$eq':
+            if item != cond_value:
+                return False
+        elif op == '$gt':
+            if not (item is not None and item > cond_value):
+                return False
+        elif op == '$gte':
+            if not (item is not None and item >= cond_value):
+                return False
+        elif op == '$lt':
+            if not (item is not None and item < cond_value):
+                return False
+        elif op == '$lte':
+            if not (item is not None and item <= cond_value):
+                return False
+        elif op == '$in':
+            if item not in cond_value:
+                return False
+        elif op == '$ne':
+            if item == cond_value:
+                return False
+    return True
+
+
+def _deep_equals(a: Any, b: Any) -> bool:
+    """Deep equality check for dicts, lists, and primitives.
+    
+    Args:
+        a: First value
+        b: Second value
+    
+    Returns:
+        True if values are deeply equal
+    """
+    if type(a) != type(b):
+        return False
+    if isinstance(a, dict):
+        if set(a.keys()) != set(b.keys()):
+            return False
+        return all(_deep_equals(a[k], b[k]) for k in a.keys())
+    elif isinstance(a, list):
+        if len(a) != len(b):
+            return False
+        return all(_deep_equals(ai, bi) for ai, bi in zip(a, b))
+    else:
+        return a == b
 
 
 class JSONlite:

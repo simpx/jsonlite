@@ -340,3 +340,399 @@ def test_upsert_with_inc(temp_db):
     
     created = db.find_one({'name': 'NewUser'})
     assert created['count'] == 1  # Started from 0, then +1
+
+
+# ============== ARRAY OPERATORS: $push TESTS ==============
+
+def test_push_to_existing_array(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$push': {'tags': 'golang'}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'rust', 'golang']
+
+
+def test_push_creates_array_if_not_exists(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'score': 100})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$push': {'tags': 'python'}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python']
+
+
+def test_push_multiple_values(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python']})
+    
+    # Multiple pushes
+    db.update_one({'name': 'David'}, {'$push': {'tags': 'rust'}})
+    db.update_one({'name': 'David'}, {'$push': {'tags': 'golang'}})
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'rust', 'golang']
+
+
+def test_push_to_nested_array(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'skills': {'languages': ['python']}})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$push': {'skills.languages': 'rust'}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['skills']['languages'] == ['python', 'rust']
+
+
+# ============== ARRAY OPERATORS: $pull TESTS ==============
+
+def test_pull_simple_value(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust', 'golang']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pull': {'tags': 'rust'}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'golang']
+
+
+def test_pull_all_matching_values(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'scores': [85, 92, 85, 78, 85]})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pull': {'scores': 85}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['scores'] == [92, 78]
+
+
+def test_pull_with_operator_condition(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'scores': [85, 92, 70, 78, 95]})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pull': {'scores': {'$lt': 80}}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['scores'] == [85, 92, 95]
+
+
+def test_pull_with_gt_operator(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'scores': [85, 92, 70, 78, 95]})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pull': {'scores': {'$gt': 90}}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['scores'] == [85, 70, 78]
+
+
+def test_pull_nonexistent_value(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pull': {'tags': 'golang'}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 0  # No change
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'rust']
+
+
+# ============== ARRAY OPERATORS: $addToSet TESTS ==============
+
+def test_addToSet_adds_unique_value(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$addToSet': {'tags': 'golang'}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'rust', 'golang']
+
+
+def test_addToSet_skips_duplicate(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$addToSet': {'tags': 'python'}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 0  # No change, already exists
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'rust']
+
+
+def test_addToSet_creates_array_if_not_exists(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'score': 100})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$addToSet': {'tags': 'python'}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python']
+
+
+def test_addToSet_with_dict(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'items': [{'id': 1, 'name': 'a'}]})
+    
+    # Try to add duplicate dict
+    result = db.update_one(
+        {'name': 'David'},
+        {'$addToSet': {'items': {'id': 1, 'name': 'a'}}}
+    )
+    assert result.modified_count == 0  # Duplicate, not added
+    
+    # Add unique dict
+    result = db.update_one(
+        {'name': 'David'},
+        {'$addToSet': {'items': {'id': 2, 'name': 'b'}}}
+    )
+    assert result.modified_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert len(updated['items']) == 2
+    assert {'id': 2, 'name': 'b'} in updated['items']
+
+
+# ============== ARRAY OPERATORS: $pop TESTS ==============
+
+def test_pop_remove_last(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust', 'golang']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pop': {'tags': 1}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'rust']
+
+
+def test_pop_remove_first(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust', 'golang']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pop': {'tags': -1}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['rust', 'golang']
+
+
+def test_pop_empty_array(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': []})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pop': {'tags': 1}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 0  # No change
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == []
+
+
+def test_pop_multiple_times(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['a', 'b', 'c']})
+    
+    db.update_one({'name': 'David'}, {'$pop': {'tags': 1}})  # Remove 'c'
+    db.update_one({'name': 'David'}, {'$pop': {'tags': -1}})  # Remove 'a'
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['b']
+
+
+# ============== ARRAY OPERATORS: $pullAll TESTS ==============
+
+def test_pullAll_single_value(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust', 'golang']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pullAll': {'tags': ['rust']}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'golang']
+
+
+def test_pullAll_multiple_values(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust', 'golang', 'java']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pullAll': {'tags': ['rust', 'java']}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'golang']
+
+
+def test_pullAll_nonexistent_values(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pullAll': {'tags': ['golang', 'java']}}
+    )
+    assert result.matched_count == 1
+    assert result.modified_count == 0
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'rust']
+
+
+# ============== COMBINED ARRAY OPERATORS TESTS ==============
+
+def test_combined_push_and_pull(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust']})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$push': {'tags': 'golang'}, '$pull': {'tags': 'rust'}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['python', 'golang']
+
+
+def test_combined_addToSet_and_pop(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['python', 'rust']})
+    
+    db.update_one({'name': 'David'}, {'$addToSet': {'tags': 'golang'}})
+    db.update_one({'name': 'David'}, {'$pop': {'tags': -1}})
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['tags'] == ['rust', 'golang']
+
+
+def test_combined_all_array_operators(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'tags': ['a', 'b', 'c'], 'scores': [80, 90, 100]})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {
+            '$push': {'tags': 'd'},
+            '$pull': {'scores': {'$lt': 85}},
+            '$addToSet': {'tags': 'e'},
+            '$pop': {'tags': -1},
+            '$pullAll': {'tags': ['b']}
+        }
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    # tags: ['a', 'b', 'c'] -> push 'd' -> ['a', 'b', 'c', 'd']
+    #       -> addToSet 'e' -> ['a', 'b', 'c', 'd', 'e']
+    #       -> pop -1 (first) -> ['b', 'c', 'd', 'e']
+    #       -> pullAll ['b'] -> ['c', 'd', 'e']
+    assert updated['tags'] == ['c', 'd', 'e']
+    # scores: [80, 90, 100] -> pull <$lt: 85> -> [90, 100]
+    assert updated['scores'] == [90, 100]
+
+
+# ============== ARRAY OPERATORS WITH NESTED FIELDS ==============
+
+def test_push_nested_array(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'profile': {'tags': ['python']}})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$push': {'profile.tags': 'rust'}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['profile']['tags'] == ['python', 'rust']
+
+
+def test_pull_nested_array(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'profile': {'tags': ['python', 'rust', 'golang']}})
+    
+    result = db.update_one(
+        {'name': 'David'},
+        {'$pull': {'profile.tags': 'rust'}}
+    )
+    assert result.matched_count == 1
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['profile']['tags'] == ['python', 'golang']
+
+
+def test_addToSet_nested_array(temp_db):
+    db, _ = temp_db
+    db.insert_one({'name': 'David', 'profile': {'tags': ['python']}})
+    
+    db.update_one({'name': 'David'}, {'$addToSet': {'profile.tags': 'rust'}})
+    db.update_one({'name': 'David'}, {'$addToSet': {'profile.tags': 'python'}})  # Duplicate
+    
+    updated = db.find_one({'name': 'David'})
+    assert updated['profile']['tags'] == ['python', 'rust']
