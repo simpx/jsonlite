@@ -11,6 +11,115 @@ from datetime import datetime
 from decimal import Decimal
 from copy import deepcopy
 from bisect import insort_left, bisect_left, bisect_right
+from collections import OrderedDict
+import hashlib
+
+
+class QueryCache:
+    """LRU cache for query results.
+    
+    Provides automatic cache invalidation and size management.
+    Cache keys are generated from filter hashes for consistent lookup.
+    """
+    
+    def __init__(self, max_size: int = 100):
+        """Initialize cache with maximum size.
+        
+        Args:
+            max_size: Maximum number of cached query results (default: 100)
+        """
+        self._cache: OrderedDict = OrderedDict()
+        self._max_size = max_size
+        self._hits = 0
+        self._misses = 0
+    
+    def _hash_filter(self, filter: Dict) -> str:
+        """Generate consistent hash for a filter dict.
+        
+        Args:
+            filter: Query filter dict
+        
+        Returns:
+            Hex string hash of the filter
+        """
+        # Sort keys for consistent hashing
+        filter_str = json.dumps(filter, sort_keys=True, default=str)
+        return hashlib.md5(filter_str.encode()).hexdigest()
+    
+    def get(self, filter: Dict) -> Optional[List[Dict]]:
+        """Get cached query result.
+        
+        Args:
+            filter: Query filter dict
+        
+        Returns:
+            Cached results or None if not found
+        """
+        key = self._hash_filter(filter)
+        if key in self._cache:
+            self._hits += 1
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            return deepcopy(self._cache[key])
+        self._misses += 1
+        return None
+    
+    def set(self, filter: Dict, results: List[Dict]) -> None:
+        """Cache query results.
+        
+        Args:
+            filter: Query filter dict
+            results: Query results to cache
+        """
+        key = self._hash_filter(filter)
+        # Remove old entry if exists (to update position)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            # Evict oldest if at capacity
+            if len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+        self._cache[key] = deepcopy(results)
+    
+    def invalidate(self, filter: Optional[Dict] = None) -> None:
+        """Invalidate cache entries.
+        
+        Args:
+            filter: If provided, invalidate only matching query.
+                   If None, clear entire cache.
+        """
+        if filter is None:
+            self._cache.clear()
+        else:
+            key = self._hash_filter(filter)
+            if key in self._cache:
+                del self._cache[key]
+    
+    def clear(self) -> None:
+        """Clear entire cache."""
+        self._cache.clear()
+    
+    @property
+    def stats(self) -> Dict:
+        """Get cache statistics.
+        
+        Returns:
+            Dict with hits, misses, size, and hit_rate
+        """
+        total = self._hits + self._misses
+        hit_rate = (self._hits / total * 100) if total > 0 else 0
+        return {
+            'hits': self._hits,
+            'misses': self._misses,
+            'size': len(self._cache),
+            'max_size': self._max_size,
+            'hit_rate': round(hit_rate, 2)
+        }
+    
+    def reset_stats(self) -> None:
+        """Reset cache statistics."""
+        self._hits = 0
+        self._misses = 0
 
 
 @dataclass
@@ -1053,8 +1162,17 @@ def _deep_equals(a: Any, b: Any) -> bool:
 
 
 class JSONlite:
-    def __init__(self, filename: str):
+    def __init__(self, filename: str, cache_enabled: bool = True, cache_size: int = 100):
+        """Initialize JSONlite database.
+        
+        Args:
+            filename: Path to the JSON database file
+            cache_enabled: Enable query result caching (default: True)
+            cache_size: Maximum cached queries (default: 100)
+        """
         self._filename = filename
+        self._cache_enabled = cache_enabled
+        self._cache = QueryCache(max_size=cache_size) if cache_enabled else None
         self.operators = {
             '$gt': lambda v, c: v is not None and v > c,
             '$lt': lambda v, c: v is not None and v < c,
@@ -1241,6 +1359,9 @@ class JSONlite:
 
     @_synchronized_write
     def _insert_one(self, record: Dict) -> int:
+        # Invalidate cache on write
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
         return self._raw_insert_one(record)
     def insert_one(self, record: Dict) -> InsertOneResult:
         return InsertOneResult(inserted_id=self._insert_one(record))
@@ -1248,6 +1369,9 @@ class JSONlite:
     @_synchronized_write
     def _insert_many(self, records: List[Dict]) -> List[int]:
         """Internal batch insert - single read/write cycle for all records."""
+        # Invalidate cache on write
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
         inserted_ids = []
         for record in records:
             if "_id" in record:
@@ -1282,6 +1406,10 @@ class JSONlite:
     @_synchronized_write
     def _update(self, filter: Dict, update_values: Dict,
                 update_all: bool = False, upsert: bool = False) -> UpdateResult:
+        # Invalidate cache on write
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
+        
         matched_count = 0
         modified_count = 0
         
@@ -1325,15 +1453,31 @@ class JSONlite:
 
     @_synchronized_read
     def _find(self, filter: Dict, find_all: bool = False) -> List[Dict]:
+        # Try cache first (only for find_all queries)
+        if self._cache_enabled and find_all and self._cache:
+            cached = self._cache.get(filter)
+            if cached is not None:
+                return cached
+        
         if filter == {}:
             # fastpath
-            return self._data if find_all else self._data[:1]
+            result = self._data if find_all else self._data[:1]
+            # Cache the result for empty filter queries
+            if self._cache_enabled and find_all and self._cache:
+                self._cache.set(filter, result)
+            return result
+        
         found_records = []
         for record in self._data:
             if self._match_filter(filter, record):
                 found_records.append(record)
                 if not find_all:
                     break
+        
+        # Cache the result
+        if self._cache_enabled and find_all and self._cache:
+            self._cache.set(filter, found_records)
+        
         return found_records
 
     def find_one(self, filter: Dict = {}) -> Union[Dict, None]:
@@ -1411,9 +1555,13 @@ class JSONlite:
             # between find and replace
             self.update_one(filter, update)
         return existing_record
-
+    
     @_synchronized_write
     def _delete(self, filter: Dict, delete_all: bool = False) -> DeleteResult:
+        # Invalidate cache on write
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
+
         deleted_count = 0
         if filter == {} and delete_all:
             # fastpath
@@ -1472,6 +1620,36 @@ class JSONlite:
             if any(query in str(value) for value in record.values()):
                 results.append(record)
         return results
+    
+    # ==================== Cache Management ====================
+    
+    def get_cache_stats(self) -> Optional[Dict]:
+        """Get query cache statistics.
+        
+        Returns:
+            Dict with hits, misses, size, max_size, and hit_rate.
+            None if cache is disabled.
+        
+        Example:
+            >>> stats = db.get_cache_stats()
+            >>> print(f"Hit rate: {stats['hit_rate']}%")
+        """
+        if not self._cache_enabled or not self._cache:
+            return None
+        return self._cache.stats
+    
+    def clear_cache(self) -> None:
+        """Clear the query cache.
+        
+        Note: Cache is automatically cleared on write operations.
+        """
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
+    
+    def reset_cache_stats(self) -> None:
+        """Reset cache statistics (hits/misses counters)."""
+        if self._cache_enabled and self._cache:
+            self._cache.reset_stats()
     
     # ==================== Index Management ====================
     
@@ -1558,6 +1736,9 @@ class JSONlite:
         self._data.append(record_with_id)
         # Add to indexes
         self._index_manager.add_document(record_with_id)
+        # Invalidate cache on write
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
         return record_with_id["_id"]
     
     @_synchronized_write
@@ -1602,6 +1783,10 @@ class JSONlite:
             upserted_id = self._insert_one_with_index(upserted_record)
             return UpdateResult(matched_count=0, modified_count=0, upserted_id=upserted_id)
         
+        # Invalidate cache on write
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
+        
         return UpdateResult(matched_count=matched_count, modified_count=modified_count)
     
     def update_one(self, filter: Dict, update_values: Dict, upsert: bool = False) -> UpdateResult:
@@ -1632,6 +1817,9 @@ class JSONlite:
                         break
                 else:
                     idx += 1
+        # Invalidate cache on write
+        if self._cache_enabled and self._cache:
+            self._cache.clear()
         return DeleteResult(deleted_count=deleted_count)
     
     def delete_one(self, filter: Dict) -> DeleteResult:
@@ -1642,6 +1830,12 @@ class JSONlite:
     
     def _find_with_index(self, filter: Dict, find_all: bool = False) -> List[Dict]:
         """Find using indexes when possible for optimization."""
+        # Try cache first (only for find_all queries)
+        if self._cache_enabled and find_all and self._cache:
+            cached = self._cache.get(filter)
+            if cached is not None:
+                return cached
+        
         # Try to use index for simple equality filters
         if len(filter) == 1:
             field, value = list(filter.items())[0]
@@ -1651,11 +1845,19 @@ class JSONlite:
                     # Build id -> record map
                     id_map = {doc['_id']: doc for doc in self._data}
                     results = [id_map[_id] for _id in indexed_ids if _id in id_map]
-                    return results if find_all else results[:1]
+                    result = results if find_all else results[:1]
+                    # Cache the result
+                    if self._cache_enabled and find_all and self._cache:
+                        self._cache.set(filter, result)
+                    return result
         
         # Fall back to full scan
         if filter == {}:
-            return self._data if find_all else self._data[:1]
+            result = self._data if find_all else self._data[:1]
+            # Cache the result for empty filter queries
+            if self._cache_enabled and find_all and self._cache:
+                self._cache.set(filter, result)
+            return result
         
         found_records = []
         for record in self._data:
@@ -1663,6 +1865,11 @@ class JSONlite:
                 found_records.append(record)
                 if not find_all:
                     break
+        
+        # Cache the result
+        if self._cache_enabled and find_all and self._cache:
+            self._cache.set(filter, found_records)
+        
         return found_records
     
     @_synchronized_read
