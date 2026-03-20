@@ -215,6 +215,106 @@ class Cursor:
         return results[index]
 
 
+def _get_nested_value(doc: Dict, path: str) -> Any:
+    """Get value from nested document using dot notation."""
+    parts = path.split('.')
+    current = doc
+    for part in parts:
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _set_nested_value(doc: Dict, path: str, value: Any) -> None:
+    """Set value in nested document using dot notation."""
+    parts = path.split('.')
+    current = doc
+    for part in parts[:-1]:
+        if part not in current:
+            current[part] = {}
+        current = current[part]
+    current[parts[-1]] = value
+
+
+def _delete_nested_value(doc: Dict, path: str) -> bool:
+    """Delete value from nested document using dot notation. Returns True if deleted."""
+    parts = path.split('.')
+    current = doc
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    if parts[-1] in current:
+        del current[parts[-1]]
+        return True
+    return False
+
+
+def _apply_update_operators(record: Dict, update_values: Dict) -> Dict:
+    """Apply MongoDB-style update operators to a record.
+    
+    Supported operators:
+    - $set: Set field values
+    - $unset: Remove fields
+    - $inc: Increment/decrement numeric fields
+    - $rename: Rename fields
+    - $max: Update if new value is greater
+    - $min: Update if new value is smaller
+    
+    Args:
+        record: The document to update
+        update_values: Dict of operators and their values
+    
+    Returns:
+        Updated record
+    """
+    new_record = deepcopy(record)
+    
+    # $set - Set field values
+    if '$set' in update_values:
+        for field, value in update_values['$set'].items():
+            _set_nested_value(new_record, field, value)
+    
+    # $unset - Remove fields
+    if '$unset' in update_values:
+        for field in update_values['$unset']:
+            _delete_nested_value(new_record, field)
+    
+    # $inc - Increment/decrement
+    if '$inc' in update_values:
+        for field, delta in update_values['$inc'].items():
+            current = _get_nested_value(new_record, field)
+            if current is None:
+                current = 0
+            if isinstance(current, (int, float, Decimal)) and isinstance(delta, (int, float, Decimal)):
+                _set_nested_value(new_record, field, current + delta)
+    
+    # $rename - Rename fields
+    if '$rename' in update_values:
+        for old_field, new_field in update_values['$rename'].items():
+            value = _get_nested_value(new_record, old_field)
+            if value is not None:
+                _delete_nested_value(new_record, old_field)
+                _set_nested_value(new_record, new_field, value)
+    
+    # $max - Update if new value is greater
+    if '$max' in update_values:
+        for field, value in update_values['$max'].items():
+            current = _get_nested_value(new_record, field)
+            if current is None or (isinstance(current, (int, float, Decimal)) and value > current):
+                _set_nested_value(new_record, field, value)
+    
+    # $min - Update if new value is smaller
+    if '$min' in update_values:
+        for field, value in update_values['$min'].items():
+            current = _get_nested_value(new_record, field)
+            if current is None or (isinstance(current, (int, float, Decimal)) and value < current):
+                _set_nested_value(new_record, field, value)
+    
+    return new_record
+
+
 class JSONlite:
     def __init__(self, filename: str):
         self._filename = filename
@@ -407,13 +507,8 @@ class JSONlite:
         for idx, record in enumerate(self._data):
             if self._match_filter(filter, record):
                 matched_count += 1
-                new_record = record.copy()
-                # TODO apply update
-                if "$set" in update_values:
-                    new_record.update(update_values["$set"])
-                else:
-                    new_record = update_values
-                    new_record['_id'] = record.get('_id')
+                # Apply update operators
+                new_record = _apply_update_operators(record, update_values)
                 if record != new_record:
                     modified_count += 1
                     self._data[idx] = new_record
@@ -421,10 +516,7 @@ class JSONlite:
                     break
         if matched_count == 0 and upsert:
             upserted_record = filter.copy()
-            if "$set" in update_values:
-                upserted_record.update(update_values["$set"])
-            else:
-                upserted_record.update(update_values)
+            upserted_record = _apply_update_operators(upserted_record, update_values)
             upserted_id = self._raw_insert_one(upserted_record)
             return UpdateResult(matched_count=0, modified_count=0, upserted_id=upserted_id)
         return UpdateResult(
