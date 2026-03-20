@@ -215,6 +215,311 @@ class Cursor:
         return results[index]
 
 
+class AggregationCursor:
+    """Cursor for aggregation pipeline operations."""
+    
+    def __init__(self, data: List[Dict], db_instance: 'JSONlite'):
+        self._data = deepcopy(data)
+        self._db = db_instance
+        self._stages: List[Dict] = []
+        self._result: Optional[List[Dict]] = None
+    
+    def _match(self, filter: Dict) -> 'AggregationCursor':
+        """$match stage: filter documents."""
+        filtered = [doc for doc in self._data if self._db._match_filter(filter, doc)]
+        self._data = filtered
+        return self
+    
+    def _group(self, group_spec: Dict) -> 'AggregationCursor':
+        """$group stage: group documents by field."""
+        _id_expr = group_spec.get('_id')
+        
+        # Handle simple field grouping (_id: "$field")
+        if isinstance(_id_expr, str) and _id_expr.startswith('$'):
+            group_field = _id_expr[1:]
+            groups = {}
+            for doc in self._data:
+                key = doc.get(group_field)
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append(doc)
+            
+            result = []
+            for key, docs in groups.items():
+                grouped_doc = {'_id': key}
+                # Process accumulators
+                for field, expr in group_spec.items():
+                    if field == '_id':
+                        continue
+                    if isinstance(expr, dict):
+                        for op, val in expr.items():
+                            if op == '$sum':
+                                if isinstance(val, str) and val.startswith('$'):
+                                    grouped_doc[field] = sum(d.get(val[1:], 0) for d in docs if isinstance(d.get(val[1:]), (int, float)))
+                                else:
+                                    grouped_doc[field] = sum(val for d in docs)
+                            elif op == '$avg':
+                                if isinstance(val, str) and val.startswith('$'):
+                                    vals = [d.get(val[1:]) for d in docs if isinstance(d.get(val[1:]), (int, float))]
+                                    grouped_doc[field] = sum(vals) / len(vals) if vals else 0
+                            elif op == '$count':
+                                grouped_doc[field] = len(docs)
+                            elif op == '$min':
+                                if isinstance(val, str) and val.startswith('$'):
+                                    vals = [d.get(val[1:]) for d in docs if d.get(val[1:]) is not None]
+                                    grouped_doc[field] = min(vals) if vals else None
+                            elif op == '$max':
+                                if isinstance(val, str) and val.startswith('$'):
+                                    vals = [d.get(val[1:]) for d in docs if d.get(val[1:]) is not None]
+                                    grouped_doc[field] = max(vals) if vals else None
+                            elif op == '$first':
+                                grouped_doc[field] = docs[0].get(val[1:]) if val.startswith('$') else val
+                            elif op == '$last':
+                                grouped_doc[field] = docs[-1].get(val[1:]) if val.startswith('$') else val
+                            elif op == '$push':
+                                if isinstance(val, str) and val.startswith('$'):
+                                    grouped_doc[field] = [d.get(val[1:]) for d in docs]
+                                else:
+                                    grouped_doc[field] = [val] * len(docs)
+                result.append(grouped_doc)
+            self._data = result
+        else:
+            # Handle literal _id (all docs in one group)
+            self._data = [{'_id': _id_expr, 'count': len(self._data)}]
+        return self
+    
+    def _project(self, projection: Dict) -> 'AggregationCursor':
+        """$project stage: reshape documents."""
+        new_data = []
+        
+        # Determine if we're in include or exclude mode
+        exclude_fields = set()
+        include_fields = {}
+        exclude_mode = None
+        
+        for field, expr in projection.items():
+            if field == '_id':
+                if expr == 0:
+                    exclude_fields.add('_id')
+                continue
+            
+            if expr in [0, False]:
+                exclude_mode = True
+                exclude_fields.add(field)
+            elif expr in [1, True]:
+                if exclude_mode is None:
+                    exclude_mode = False
+                include_fields[field] = None
+            elif isinstance(expr, str) and expr.startswith('$'):
+                if exclude_mode is None:
+                    exclude_mode = False
+                include_fields[field] = expr[1:]  # Store source field
+            elif isinstance(expr, dict):
+                if exclude_mode is None:
+                    exclude_mode = False
+                include_fields[field] = expr  # Store expression
+        
+        for doc in self._data:
+            new_doc = {}
+            
+            if exclude_mode:
+                # Exclude mode: copy all fields except excluded ones
+                for key, value in doc.items():
+                    if key not in exclude_fields:
+                        new_doc[key] = value
+            else:
+                # Include mode: only include specified fields
+                # Always include _id unless explicitly excluded
+                if '_id' not in exclude_fields and '_id' in doc:
+                    new_doc['_id'] = doc['_id']
+                
+                for field, source in include_fields.items():
+                    if isinstance(source, str):
+                        # Field reference
+                        if source in doc:
+                            new_doc[field] = doc[source]
+                    elif isinstance(source, dict):
+                        # Expression
+                        new_doc[field] = self._eval_expr(source, doc)
+                    else:
+                        # Simple include
+                        if field in doc:
+                            new_doc[field] = doc[field]
+            
+            new_data.append(new_doc)
+        self._data = new_data
+        return self
+    
+    def _eval_expr(self, expr: Dict, doc: Dict) -> Any:
+        """Evaluate an expression against a document."""
+        for op, val in expr.items():
+            if op == '$concat':
+                parts = []
+                for item in val:
+                    if isinstance(item, str) and item.startswith('$'):
+                        parts.append(str(doc.get(item[1:], '')))
+                    else:
+                        parts.append(str(item))
+                return ''.join(parts)
+            elif op == '$add':
+                total = 0
+                for item in val:
+                    if isinstance(item, str) and item.startswith('$'):
+                        total += doc.get(item[1:], 0)
+                    else:
+                        total += item
+                return total
+            elif op == '$subtract':
+                result = val[0]
+                for item in val[1:]:
+                    if isinstance(item, str) and item.startswith('$'):
+                        result -= doc.get(item[1:], 0)
+                    else:
+                        result -= item
+                return result
+            elif op == '$multiply':
+                result = 1
+                for item in val:
+                    if isinstance(item, str) and item.startswith('$'):
+                        result *= doc.get(item[1:], 1)
+                    else:
+                        result *= item
+                return result
+            elif op == '$divide':
+                if len(val) >= 2:
+                    a = doc.get(val[0][1:], 0) if isinstance(val[0], str) and val[0].startswith('$') else val[0]
+                    b = doc.get(val[1][1:], 1) if isinstance(val[1], str) and val[1].startswith('$') else val[1]
+                    return a / b if b != 0 else None
+            elif op == '$size':
+                if isinstance(val, str) and val.startswith('$'):
+                    arr = doc.get(val[1:], [])
+                    return len(arr) if isinstance(arr, list) else 0
+            elif op == '$literal':
+                return val
+            elif op == '$cond':
+                # {$cond: {if: ..., then: ..., else: ...}}
+                if isinstance(val, dict):
+                    condition = val.get('if')
+                    then_val = val.get('then')
+                    else_val = val.get('else')
+                    if isinstance(then_val, str) and then_val.startswith('$'):
+                        then_val = doc.get(then_val[1:])
+                    if isinstance(else_val, str) and else_val.startswith('$'):
+                        else_val = doc.get(else_val[1:])
+                    return then_val if condition else else_val
+        return None
+    
+    def _sort(self, sort_spec: Dict) -> 'AggregationCursor':
+        """$sort stage: sort documents."""
+        sort_keys = []
+        for field, direction in sort_spec.items():
+            sort_keys.append((field, direction if direction in [1, -1] else 1))
+        
+        def sort_key(record):
+            values = []
+            for key, direction in sort_keys:
+                val = record.get(key)
+                if val is None:
+                    val = (1, None)
+                else:
+                    val = (0, val)
+                if direction == -1 and isinstance(val[1], (int, float)):
+                    val = (val[0], -val[1])
+                values.append(val)
+            return tuple(values)
+        
+        self._data.sort(key=sort_key)
+        return self
+    
+    def _skip(self, count: int) -> 'AggregationCursor':
+        """$skip stage: skip N documents."""
+        self._data = self._data[count:]
+        return self
+    
+    def _limit(self, count: int) -> 'AggregationCursor':
+        """$limit stage: limit to N documents."""
+        self._data = self._data[:count]
+        return self
+    
+    def _count(self, field_name: str = 'count') -> 'AggregationCursor':
+        """$count stage: count documents."""
+        self._data = [{field_name: len(self._data)}]
+        return self
+    
+    def _unwind(self, path: Union[str, Dict]) -> 'AggregationCursor':
+        """$unwind stage: deconstruct array field."""
+        if isinstance(path, dict):
+            field_path = path.get('path')
+            preserve_nulls = path.get('preserveNullAndEmptyArrays', False)
+        else:
+            field_path = path
+            preserve_nulls = False
+        
+        # Remove leading $ if present
+        if isinstance(field_path, str) and field_path.startswith('$'):
+            field_path = field_path[1:]
+        
+        new_data = []
+        for doc in self._data:
+            arr = _get_nested_value(doc, field_path)
+            if isinstance(arr, list) and len(arr) > 0:
+                for item in arr:
+                    new_doc = deepcopy(doc)
+                    _set_nested_value(new_doc, field_path, item)
+                    new_data.append(new_doc)
+            elif preserve_nulls:
+                new_data.append(deepcopy(doc))
+        
+        self._data = new_data
+        return self
+    
+    def aggregate(self, pipeline: List[Dict]) -> 'AggregationCursor':
+        """Execute aggregation pipeline stages."""
+        for stage in pipeline:
+            for op, spec in stage.items():
+                if op == '$match':
+                    self._match(spec)
+                elif op == '$group':
+                    self._group(spec)
+                elif op == '$project':
+                    self._project(spec)
+                elif op == '$sort':
+                    self._sort(spec)
+                elif op == '$skip':
+                    self._skip(spec)
+                elif op == '$limit':
+                    self._limit(spec)
+                elif op == '$count':
+                    self._count(spec if isinstance(spec, str) else 'count')
+                elif op == '$unwind':
+                    self._unwind(spec)
+        return self
+    
+    def all(self) -> List[Dict]:
+        """Return all results."""
+        return self._data
+    
+    def first(self) -> Optional[Dict]:
+        """Return first result."""
+        return self._data[0] if self._data else None
+    
+    def count(self) -> int:
+        """Return count of results."""
+        return len(self._data)
+    
+    def __iter__(self):
+        """Allow iteration over results."""
+        return iter(self._data)
+    
+    def __len__(self):
+        """Return length of results."""
+        return len(self._data)
+    
+    def __getitem__(self, index):
+        """Support indexing."""
+        return self._data[index]
+
+
 def _get_nested_value(doc: Dict, path: str) -> Any:
     """Get value from nested document using dot notation."""
     parts = path.split('.')
@@ -700,6 +1005,39 @@ class JSONlite:
         """
         results = self._find(filter, find_all=True)
         return Cursor(results, self)
+
+    @_synchronized_read
+    def aggregate(self, pipeline: List[Dict]) -> AggregationCursor:
+        """Execute an aggregation pipeline.
+        
+        Args:
+            pipeline: List of aggregation stages ($match, $group, $project, $sort, $skip, $limit, $count, $unwind)
+        
+        Returns:
+            AggregationCursor with results
+        
+        Examples:
+            # Match and sort
+            db.aggregate([
+                {"$match": {"age": {"$gt": 18}}},
+                {"$sort": {"age": -1}},
+                {"$limit": 10}
+            ]).all()
+            
+            # Group by field
+            db.aggregate([
+                {"$group": {"_id": "$category", "count": {"$count": {}}, "avgPrice": {"$avg": "$price"}}}
+            ]).all()
+            
+            # Project fields
+            db.aggregate([
+                {"$match": {"status": "active"}},
+                {"$project": {"name": 1, "email": 1}}
+            ]).all()
+        """
+        results = self._find({}, find_all=True)
+        cursor = AggregationCursor(results, self)
+        return cursor.aggregate(pipeline)
 
     @_synchronized_write
     def find_one_and_delete(self, filter: Dict) -> Optional[Dict]:

@@ -20,6 +20,10 @@
 - [x] 原子操作：find_one_and_delete, find_one_and_replace, find_one_and_update
 - [x] 全文搜索
 - [x] 测试套件（基础测试 + 并发测试 + 性能测试）
+- [x] 链式查询 API (Cursor: sort/limit/skip/projection)
+- [x] 更新操作符 ($set, $unset, $inc, $rename, $max, $min)
+- [x] 数组更新操作符 ($push, $pull, $addToSet, $pop, $pullAll)
+- [x] 聚合管道 (aggregate: $match, $group, $project, $sort, $skip, $limit, $count, $unwind)
 
 ### ⚠️ 待完善功能
 - [ ] 缺少排序 (sort)
@@ -82,7 +86,7 @@
 #### 交付物
 - [x] 完整更新操作符实现 (field operators)
 - [x] 数组操作测试套件 (27 个数组操作测试)
-- [ ] 更新操作文档
+- [x] 更新操作文档 (docs: Add update operators documentation)
 
 ---
 
@@ -90,13 +94,14 @@
 **目标**: 实现高级查询功能
 
 #### 任务列表
-- [ ] **聚合管道 (aggregate)** - 基础阶段
-  - `$match` - 过滤
-  - `$group` - 分组聚合
-  - `$project` - 投影
-  - `$sort` - 排序
-  - `$limit` / `$skip` - 分页
-  - `$count` - 计数
+- [x] **聚合管道 (aggregate)** - 基础阶段 ✅ (2026-03-20)
+  - `$match` - 过滤 ✅
+  - `$group` - 分组聚合 (支持 $sum, $avg, $min, $max, $count, $first, $last, $push) ✅
+  - `$project` - 投影 (支持 include/exclude 模式、表达式) ✅
+  - `$sort` - 排序 ✅
+  - `$limit` / `$skip` - 分页 ✅
+  - `$count` - 计数 ✅
+  - `$unwind` - 数组展开 ✅
 - [ ] **索引支持** - 基础索引
   - 单字段索引
   - 复合索引
@@ -108,7 +113,7 @@
 - [ ] **基准测试** - 与 SQLite/其他 JSON DB 对比
 
 #### 交付物
-- [ ] 聚合管道实现
+- [x] 聚合管道实现 (AggregationCursor class, 20 tests passing) ✅
 - [ ] 索引系统
 - [ ] 性能基准报告
 
