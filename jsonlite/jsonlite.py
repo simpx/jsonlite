@@ -504,11 +504,20 @@ class JSONlite:
                 update_all: bool = False, upsert: bool = False) -> UpdateResult:
         matched_count = 0
         modified_count = 0
+        
+        # Check if update_values contains any operators (keys starting with $)
+        has_operators = any(key.startswith('$') for key in update_values.keys())
+        
         for idx, record in enumerate(self._data):
             if self._match_filter(filter, record):
                 matched_count += 1
-                # Apply update operators
-                new_record = _apply_update_operators(record, update_values)
+                if has_operators:
+                    # Apply update operators
+                    new_record = _apply_update_operators(record, update_values)
+                else:
+                    # Full document replacement (preserve _id)
+                    new_record = update_values.copy()
+                    new_record['_id'] = record.get('_id')
                 if record != new_record:
                     modified_count += 1
                     self._data[idx] = new_record
@@ -516,7 +525,10 @@ class JSONlite:
                     break
         if matched_count == 0 and upsert:
             upserted_record = filter.copy()
-            upserted_record = _apply_update_operators(upserted_record, update_values)
+            if has_operators:
+                upserted_record = _apply_update_operators(upserted_record, update_values)
+            else:
+                upserted_record.update(update_values)
             upserted_id = self._raw_insert_one(upserted_record)
             return UpdateResult(matched_count=0, modified_count=0, upserted_id=upserted_id)
         return UpdateResult(
