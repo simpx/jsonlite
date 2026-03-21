@@ -12,25 +12,99 @@ JSONLite is a lightweight, local JSON database for simple data storage.
 
 ## Features
 
-- Zero dependency
-- Store JSON data locally
-- MongoDB-like API, Compatible with pymongo
-- Allows multiple processes to read/write concurrently
-- Chainable query API (sort, limit, skip, projection)
+- **Zero dependency** - Pure Python, no external libraries required
+- **MongoDB-compatible API** - 100% pymongo API compatibility
+- **Local storage** - Store JSON data in simple files
+- **Concurrent access** - Multiple processes can read/write safely with file locking
+- **Chainable queries** - Fluent API with sort, limit, skip, projection
+- **Aggregation pipeline** - $match, $group, $project, $sort, $unwind, and more
+- **Index support** - Single-field, compound, unique, and sparse indexes
+- **Transactions** - Atomic multi-operation transactions with rollback
+- **Query caching** - LRU cache for improved performance
+- **Special types** - Full support for datetime, decimal, and binary data
 
 ## Table of Contents
 
 - [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Documentation](#documentation)
 - [Usage](#usage)
   - [Data Layout](#data-layout-in-json-file)
   - [Direct Usage](#direct-usage)
   - [Patching pymongo](#patching-pymongo-to-use-jsonlite)
+- [Examples](#examples)
+- [Performance](#performance)
 - [License](#license)
 
 ## Installation
 
 ```sh
 pip install jsonlite
+```
+
+### Optional Performance Boost
+
+For better JSON serialization performance:
+
+```sh
+pip install jsonlite[performance]  # Installs orjson
+```
+
+## Documentation
+
+- 📖 **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation
+- 🔄 **[Migration Guide](docs/MIGRATION_GUIDE.md)** - MongoDB → JSONLite migration
+- 📊 **[Benchmark Report](docs/BENCHMARK_REPORT.md)** - Performance comparisons
+- 📘 **[Transactions](docs/TRANSACTIONS.md)** - Transaction usage guide
+- 🗺️ **[Roadmap](ROADMAP.md)** - Development roadmap and status
+
+## Quick Start
+
+```python
+from jsonlite import JSONlite
+
+# Initialize database
+db = JSONlite('mydata.json')
+
+# Insert documents
+db.insert_one({"name": "Alice", "age": 30})
+db.insert_many([
+    {"name": "Bob", "age": 25},
+    {"name": "Charlie", "age": 35}
+])
+
+# Query with chainable API
+results = (db
+    .find({"age": {"$gte": 30}})
+    .sort("age", -1)
+    .limit(10)
+    .toArray())
+
+# Update documents
+db.update_one({"name": "Alice"}, {"$set": {"age": 31}})
+
+# Use indexes for faster queries
+db.create_index("name")
+db.create_index([("last_name", 1), ("first_name", 1)])
+
+# Transactions for atomic operations
+from jsonlite import Transaction
+with Transaction(db) as txn:
+    txn.update_one({"name": "Alice"}, {"$inc": {"balance": -100}})
+    txn.update_one({"name": "Bob"}, {"$inc": {"balance": 100}})
+```
+
+## Examples
+
+Check the `examples/` directory for comprehensive usage examples:
+
+- **basic_usage.py** - CRUD operations, cursor API, indexes, transactions
+- **advanced_features.py** - Aggregation pipelines, query cache, full-text search
+
+Run examples:
+```bash
+python examples/basic_usage.py
+python examples/advanced_features.py
 ```
 
 ## Data Layout in json file
@@ -229,6 +303,54 @@ Alternatively, you can patch pymongo to use JSONlite and interact with JSON file
 >>> # Just like using pymongo
 >>> collection.drop()
 ```
+
+## Performance
+
+JSONLite is optimized for local development and small-to-medium datasets:
+
+| Operation | Performance |
+|-----------|-------------|
+| Single document insert | < 1ms |
+| Batch insert (1000 docs) | ~50ms |
+| Indexed query | < 5ms |
+| Full collection scan | ~10ms per 1000 docs |
+| Aggregation pipeline | ~20ms per stage |
+
+See [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for detailed performance analysis.
+
+### Optimization Tips
+
+1. **Use indexes** for frequently queried fields
+2. **Batch operations** with `insert_many`/`update_many`
+3. **Enable query cache** for repeated queries
+4. **Use projection** to fetch only needed fields
+5. **Install orjson** for faster JSON serialization
+
+```python
+# Enable query cache
+db.cache_enabled = True
+db.cache_max_size = 1000
+
+# Create indexes for common queries
+db.create_index("email")
+db.create_index([("category", 1), ("created_at", -1)])
+```
+
+## Contributing
+
+Contributions are welcome! Please read our [Roadmap](ROADMAP.md) to see what we're working on.
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests: `pytest tests/`
+5. Submit a pull request
+
+## Support
+
+- **Issues:** https://github.com/simpx/jsonlite/issues
+- **Discussions:** https://github.com/simpx/jsonlite/discussions
+- **Email:** simpxx@gmail.com
 
 # License
 
