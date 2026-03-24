@@ -156,8 +156,10 @@
 #### 交付物
 - [x] v1.0.0 稳定版 (待打标签发布)
 - [x] 完整文档
-- [ ] PyPI 发布 (待执行：git push + git tag)
-- [ ] GitHub Release (待执行)
+- [x] git push origin main ✅ (2026-03-24)
+- [x] v1.0.0 tag 已创建 ✅
+- [ ] PyPI 发布 (需用户配置 PyPI token 并触发 CI/CD)
+- [ ] GitHub Release (需在 GitHub 上手动创建或通过 CI 触发)
 
 #### 待执行操作
 ```bash
