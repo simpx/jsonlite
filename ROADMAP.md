@@ -111,7 +111,7 @@
   - [x] 批量操作优化 (减少文件 I/O) ✅ insert_many 优化：262x 提升
   - [x] 查询结果缓存 (LRU cache) ✅ (2026-03-21) - 202 tests passing
     - Fixed: Handle callable keys in QueryCache hash function (2026-03-21)
-  - [ ] 可选 orjson/ujson 加速序列化 (待实现)
+  - [x] 可选 orjson/ujson 加速序列化 ✅ (2026-03-21)
 
 #### 交付物
 - [x] 聚合管道实现 (AggregationCursor class, 20 tests passing) ✅
