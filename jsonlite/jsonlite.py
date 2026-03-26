@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 import base64
+import math
 from dataclasses import dataclass
 from functools import wraps
 from typing import List, Dict, Union, Any, Optional, Tuple
@@ -58,6 +59,249 @@ def _fast_loads(s: str) -> Any:
     if _USE_ORJSON:
         return orjson.loads(s)
     return json.loads(s)
+
+
+# =============================================================================
+# Geospatial Helper Functions
+# =============================================================================
+
+def _extract_coordinates(value: Any) -> Optional[Tuple[float, float]]:
+    """Extract [longitude, latitude] from various GeoJSON formats.
+    
+    Supports:
+    - Direct array: [lng, lat]
+    - GeoJSON Point: {"type": "Point", "coordinates": [lng, lat]}
+    - Custom format: {"lng": x, "lat": y} or {"lon": x, "lat": y}
+    
+    Args:
+        value: Value to extract coordinates from
+    
+    Returns:
+        Tuple of (longitude, latitude) or None if invalid
+    """
+    if value is None:
+        return None
+    
+    # Direct array format [lng, lat]
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return (float(value[0]), float(value[1]))
+        except (TypeError, ValueError):
+            return None
+    
+    # GeoJSON Point format
+    if isinstance(value, dict):
+        if value.get('type') == 'Point' and 'coordinates' in value:
+            coords = value['coordinates']
+            if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+                try:
+                    return (float(coords[0]), float(coords[1]))
+                except (TypeError, ValueError):
+                    return None
+        
+        # Custom format {lng/lon: x, lat: y}
+        lng = value.get('lng') or value.get('lon') or value.get('longitude')
+        lat = value.get('lat') or value.get('latitude')
+        if lng is not None and lat is not None:
+            try:
+                return (float(lng), float(lat))
+            except (TypeError, ValueError):
+                return None
+    
+    return None
+
+
+def _haversine_distance(coord1: Tuple[float, float], coord2: Tuple[float, float]) -> float:
+    """Calculate the great-circle distance between two points using Haversine formula.
+    
+    Args:
+        coord1: (longitude, latitude) of first point in degrees
+        coord2: (longitude, latitude) of second point in degrees
+    
+    Returns:
+        Distance in meters
+    """
+    R = 6371000  # Earth's radius in meters
+    
+    lng1, lat1 = math.radians(coord1[0]), math.radians(coord1[1])
+    lng2, lat2 = math.radians(coord2[0]), math.radians(coord2[1])
+    
+    dlng = lng2 - lng1
+    dlat = lat2 - lat1
+    
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+    
+    return R * c
+
+
+def _point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
+    """Check if a point is inside a polygon using ray casting algorithm.
+    
+    Args:
+        point: (longitude, latitude) of the point to check
+        polygon: List of (longitude, latitude) vertices defining the polygon
+    
+    Returns:
+        True if point is inside the polygon
+    """
+    x, y = point
+    inside = False
+    
+    n = len(polygon)
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+        
+        # Check if ray crosses edge
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
+            inside = not inside
+    
+    return inside
+
+
+def _point_in_circle(point: Tuple[float, float], center: Tuple[float, float], radius_meters: float) -> bool:
+    """Check if a point is inside a circle.
+    
+    Args:
+        point: (longitude, latitude) of the point to check
+        center: (longitude, latitude) of the circle center
+        radius_meters: Circle radius in meters
+    
+    Returns:
+        True if point is inside the circle
+    """
+    distance = _haversine_distance(point, center)
+    return distance <= radius_meters
+
+
+def _extract_geometry(geometry: Any) -> Any:
+    """Extract geometry from various formats.
+    
+    Supports:
+    - GeoJSON: {"type": "Polygon", "coordinates": [...]}
+    - Circle: {"$center": [lng, lat], "$radius": meters}
+    - Box: {"$box": [[minLng, minLat], [maxLng, maxLat]]}
+    
+    Args:
+        geometry: Geometry definition
+    
+    Returns:
+        Parsed geometry object or None
+    """
+    if not isinstance(geometry, dict):
+        return None
+    
+    # GeoJSON format
+    if 'type' in geometry:
+        return geometry
+    
+    # Circle format {$center: [lng, lat], $radius: meters}
+    if '$center' in geometry and '$radius' in geometry:
+        center = _extract_coordinates(geometry['$center'])
+        if center:
+            return {
+                'type': 'Circle',
+                'center': center,
+                'radius': float(geometry['$radius'])
+            }
+    
+    # Box format {$box: [[minLng, minLat], [maxLng, maxLat]]}
+    if '$box' in geometry:
+        box = geometry['$box']
+        if isinstance(box, (list, tuple)) and len(box) == 2:
+            min_coord = _extract_coordinates(box[0])
+            max_coord = _extract_coordinates(box[1])
+            if min_coord and max_coord:
+                return {
+                    'type': 'Box',
+                    'min': min_coord,
+                    'max': max_coord
+                }
+    
+    return None
+
+
+def _geometry_contains(geometry: Any, point: Tuple[float, float]) -> bool:
+    """Check if a geometry contains a point.
+    
+    Args:
+        geometry: Geometry object (Polygon, Circle, Box, etc.)
+        point: (longitude, latitude) to check
+    
+    Returns:
+        True if geometry contains the point
+    """
+    if not isinstance(geometry, dict):
+        return False
+    
+    geom_type = geometry.get('type')
+    
+    if geom_type == 'Polygon':
+        coords = geometry.get('coordinates', [])
+        if coords and isinstance(coords[0], list):
+            # Outer ring
+            ring = [_extract_coordinates(pt) for pt in coords[0]]
+            ring = [c for c in ring if c is not None]
+            if ring:
+                return _point_in_polygon(point, ring)
+    
+    elif geom_type == 'Circle':
+        center = geometry.get('center')
+        radius = geometry.get('radius', 0)
+        if center:
+            return _point_in_circle(point, center, radius)
+    
+    elif geom_type == 'Box':
+        min_coord = geometry.get('min')
+        max_coord = geometry.get('max')
+        if min_coord and max_coord:
+            return (min_coord[0] <= point[0] <= max_coord[0] and
+                    min_coord[1] <= point[1] <= max_coord[1])
+    
+    elif geom_type == 'Point':
+        center = _extract_coordinates(geometry.get('coordinates'))
+        if center:
+            return center == point
+    
+    return False
+
+
+def _geo_intersects(geom1: Any, geom2: Any) -> bool:
+    """Check if two geometries intersect.
+    
+    Args:
+        geom1: First geometry
+        geom2: Second geometry
+    
+    Returns:
+        True if geometries intersect
+    """
+    # For now, implement basic point-in-geometry check
+    # More complex intersection logic can be added later
+    
+    # If one is a point, check if it's in the other
+    if geom1.get('type') == 'Point':
+        point = _extract_coordinates(geom1.get('coordinates'))
+        if point:
+            return _geometry_contains(geom2, point)
+    
+    if geom2.get('type') == 'Point':
+        point = _extract_coordinates(geom2.get('coordinates'))
+        if point:
+            return _geometry_contains(geom1, point)
+    
+    # For polygon-polygon, check if any vertex of one is inside the other
+    if geom1.get('type') == 'Polygon' and geom2.get('type') == 'Polygon':
+        coords1 = geom1.get('coordinates', [[]])[0]
+        for pt in coords1:
+            point = _extract_coordinates(pt)
+            if point and _geometry_contains(geom2, point):
+                return True
+        return False
+    
+    # Default: no intersection detected
+    return False
 
 
 class QueryCache:
@@ -276,6 +520,48 @@ class Cursor:
             Self for chaining
         """
         self._projection = fields
+        return self
+    
+    def near(self, field: str, point: Union[List[float], Tuple[float, float]], 
+             max_distance: Optional[float] = None, min_distance: float = 0) -> 'Cursor':
+        """Sort results by geospatial distance from a point.
+        
+        Args:
+            field: Field name containing location data
+            point: [longitude, latitude] reference point
+            max_distance: Maximum distance in meters (optional)
+            min_distance: Minimum distance in meters (default: 0)
+        
+        Returns:
+            Self for chaining
+        
+        Examples:
+            # Find restaurants near a point, sorted by distance
+            db.find({"type": "restaurant"}).near("location", [116.4, 39.9]).limit(10).all()
+            
+            # Find within 1km radius
+            db.find({}).near("location", [116.4, 39.9], max_distance=1000).all()
+        """
+        point_coords = _extract_coordinates(point)
+        if not point_coords:
+            return self
+        
+        # Calculate distances and filter by max/min distance
+        filtered_data = []
+        for record in self._data:
+            record_point = _extract_coordinates(record.get(field))
+            if record_point:
+                distance = _haversine_distance(point_coords, record_point)
+                if min_distance <= distance <= (max_distance if max_distance is not None else float('inf')):
+                    # Store distance for sorting
+                    record['_geo_distance_' + field] = distance
+                    filtered_data.append(record)
+        
+        self._data = filtered_data
+        
+        # Sort by distance (ascending - nearest first)
+        self._sort_keys = [('_geo_distance_' + field, 1)]
+        
         return self
     
     def _apply_sort(self) -> 'Cursor':
@@ -1252,7 +1538,10 @@ class JSONlite:
             '$eq': lambda v, c: v == c,
             '$regex': lambda v, c, o=None: re.search(c, v) is not None,
             '$in': lambda v, c: v in c,
-            '$all': lambda v, c: isinstance(v, (list, tuple)) and all(item in v for item in c)
+            '$all': lambda v, c: isinstance(v, (list, tuple)) and all(item in v for item in c),
+            # Geospatial operators
+            '$geoWithin': lambda v, c: _geometry_contains(_extract_geometry(c), _extract_coordinates(v)) if _extract_coordinates(v) and _extract_geometry(c) else False,
+            '$geoIntersects': lambda v, c: _geo_intersects({'type': 'Point', 'coordinates': _extract_coordinates(v)}, _extract_geometry(c)) if _extract_coordinates(v) and _extract_geometry(c) else False,
         }
         self._index_manager = IndexManager()
         self._index_metadata = []
@@ -1369,7 +1658,34 @@ class JSONlite:
                 return self.operators["$regex"](
                 v, c, options)
             filter[new_regex_op] = filter.pop("$regex")
+        
         for key, condition in filter.items():
+            # Handle $near with optional $maxDistance/$minDistance
+            # Format: {field: {$near: [lng, lat], $maxDistance: 1000, $minDistance: 100}}
+            if isinstance(condition, dict) and '$near' in condition:
+                near_point = _extract_coordinates(condition['$near'])
+                if near_point:
+                    record_point = _extract_coordinates(record.get(key))
+                    if record_point:
+                        distance = _haversine_distance(near_point, record_point)
+                        max_dist = condition.get('$maxDistance')
+                        min_dist = condition.get('$minDistance', 0)
+                        
+                        # Check distance constraints
+                        if max_dist is not None and distance > max_dist:
+                            return False
+                        if distance < min_dist:
+                            return False
+                        
+                        # Store distance for sorting (attach to record temporarily)
+                        record['_geo_distance_' + key] = distance
+                    else:
+                        return False
+                else:
+                    return False
+                # Continue to next key after handling $near
+                continue
+            
             if key == '$or':
                 if not any(self._match_filter(sub_filter, record, deep + 1)
                            for sub_filter in condition):
@@ -1385,6 +1701,10 @@ class JSONlite:
             elif key == '$not':
                 if self._match_filter(condition, record, deep + 1):
                     return False
+            # Skip splitting for $near conditions (already handled above)
+            elif isinstance(condition, dict) and '$near' in condition:
+                # $near already processed, continue
+                continue
             elif isinstance(condition, dict) and len(condition) > 1:
                 if not all(self._match_filter(
                         {key: {k: v}}, record, deep + 1) for k, v in condition.items()):
@@ -1949,11 +2269,32 @@ class JSONlite:
                 if not find_all:
                     break
         
+        # Sort by distance if $near was used
+        sorted_results = self._sort_by_near_distance(filter, found_records)
+        
         # Cache the result
         if self._cache_enabled and find_all and self._cache:
-            self._cache.set(filter, found_records)
+            self._cache.set(filter, sorted_results)
         
-        return found_records
+        return sorted_results
+    
+    def _sort_by_near_distance(self, filter: Dict, records: List[Dict]) -> List[Dict]:
+        """Sort records by distance if $near operator was used.
+        
+        Args:
+            filter: Query filter
+            records: Matched records
+        
+        Returns:
+            Records sorted by distance (if $near was used), otherwise unchanged
+        """
+        # Check if filter contains $near
+        for key, condition in filter.items():
+            if isinstance(condition, dict) and '$near' in condition:
+                # Sort by the stored distance
+                distance_key = '_geo_distance_' + key
+                return sorted(records, key=lambda r: r.get(distance_key, float('inf')))
+        return records
     
     @_synchronized_read
     def _find(self, filter: Dict, find_all: bool = False) -> List[Dict]:
