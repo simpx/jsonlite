@@ -158,23 +158,47 @@
 - [x] 完整文档
 - [x] git push origin main ✅ (2026-03-24)
 - [x] v1.0.0 tag 已创建 ✅
-- [ ] PyPI 发布 (需用户配置 PyPI token 并触发 CI/CD)
-- [ ] GitHub Release (需在 GitHub 上手动创建或通过 CI 触发)
+- [x] PyPI 发布 ✅ (2026-03-26) - jsonlite 1.0.0 已上线
+- [x] GitHub Release ✅ (已创建并发布)
 
 #### 待执行操作
-```bash
-# 1. 推送本地提交到 GitHub
-git push origin main
+✅ **v1.0.0 发布已完成** (2026-03-26)
+- PyPI: https://pypi.org/project/jsonlite/1.0.0/
+- GitHub Release: https://github.com/simpx/jsonlite/releases/tag/v1.0.0
+- 安装：`pip install jsonlite`
 
-# 2. 创建并推送 v1.0.0 标签
-git tag -a v1.0.0 -m "Release v1.0.0 - Stable release with full MongoDB compatibility"
-git push origin v1.0.0
+---
 
-# 3. CI/CD 将自动：
-#    - 运行所有测试 (Python 3.6-3.12)
-#    - 构建 package (sdist + wheel)
-#    - 上传到 PyPI
-```
+## 🎉 v1.0.0 发布总结
+
+**发布日期**: 2026-03-26  
+**PyPI 包名**: jsonlite  
+**版本**: 1.0.0  
+**测试**: 229 tests passing ✅  
+**文档**: 完整 API 文档 + 使用教程 + 迁移指南 ✅  
+
+**核心功能**:
+- 完整 CRUD + 查询操作符 (pymongo 兼容)
+- 更新操作符 ($set, $unset, $inc, $rename, $max, $min)
+- 数组操作符 ($push, $pull, $addToSet, $pop, $pullAll)
+- 聚合管道 ($match, $group, $project, $sort, $skip, $limit, $count, $unwind)
+- 索引系统 (单字段/复合/唯一/稀疏索引，自动维护)
+- 事务支持 (原子多操作 + 回滚)
+- 查询缓存 (LRU eviction)
+- 并发支持 (fcntl 文件锁)
+- 可选 orjson 加速
+
+---
+
+## 📋 v1.1 规划建议
+
+**候选功能** (按优先级排序):
+1. 地理空间查询 ($near, $geoWithin, $geoIntersects)
+2. 全文索引优化
+3. 多数据库/集合管理
+4. 网络模式 (客户端 - 服务器架构)
+5. 数据压缩
+6. 加密支持
 
 ---
 
