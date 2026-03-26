@@ -106,6 +106,45 @@ class TransactionContext:
         return self.state == TransactionState.ACTIVE
 
 
+class Transaction:
+    """
+    Convenience wrapper for transaction context manager.
+    
+    This class provides a standalone transaction context manager that can be
+    used with the `with` statement, matching the pymongo API style.
+    
+    Usage:
+        from jsonlite import Transaction
+        
+        with Transaction(db):
+            db.insert_one({"name": "Alice"})
+            db.update_one({"name": "Bob"}, {"$set": {"status": "active"}})
+    """
+    
+    def __init__(self, db_instance: 'JSONlite'):
+        """Initialize transaction with a database instance.
+        
+        Args:
+            db_instance: JSONLite database instance
+        """
+        self._db = db_instance
+        self._context: Optional[TransactionContext] = None
+    
+    def __enter__(self) -> 'Transaction':
+        """Start the transaction."""
+        self._context = self._db._transaction_manager.begin()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """End transaction - commit on success, rollback on exception."""
+        if exc_type is not None:
+            self._db._transaction_manager.rollback()
+            return False
+        else:
+            self._db._transaction_manager.commit()
+            return False
+
+
 class TransactionManager:
     """
     Manages transactions for a JSONLite database instance.

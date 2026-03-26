@@ -834,6 +834,10 @@ class Cursor:
         """Return all matching documents after applying operations."""
         return self._execute()
     
+    def toArray(self) -> List[Dict]:
+        """Return all matching documents (pymongo-compatible alias for all())."""
+        return self._execute()
+    
     def first(self) -> Optional[Dict]:
         """Return first matching document after applying operations."""
         results = self._execute()
@@ -1139,6 +1143,10 @@ class AggregationCursor:
     
     def all(self) -> List[Dict]:
         """Return all results."""
+        return self._data
+    
+    def toArray(self) -> List[Dict]:
+        """Return all results (pymongo-compatible alias for all())."""
         return self._data
     
     def first(self) -> Optional[Dict]:
@@ -3196,3 +3204,501 @@ class JSONlite:
     def in_transaction(self) -> bool:
         """Check if currently inside a transaction."""
         return self._transaction_manager.is_active()
+
+
+# =============================================================================
+# Multi-Database & Collection Management (pymongo-compatible)
+# =============================================================================
+
+class Collection:
+    """A collection within a database (wraps JSONlite for pymongo compatibility).
+    
+    This class provides a pymongo-compatible interface to a JSONlite instance.
+    """
+    
+    def __init__(self, database: 'Database', name: str):
+        """Initialize a collection.
+        
+        Args:
+            database: Parent Database instance
+            name: Collection name
+        """
+        self._database = database
+        self._name = name
+        self._db_path = database._db_path
+        self._collection_file = os.path.join(self._db_path, f"{name}.json")
+        self._jsonlite = JSONlite(self._collection_file)
+    
+    @property
+    def name(self) -> str:
+        """Get collection name."""
+        return self._name
+    
+    @property
+    def database(self) -> 'Database':
+        """Get parent database."""
+        return self._database
+    
+    def insert_one(self, document: Dict[str, Any]) -> InsertOneResult:
+        """Insert a single document."""
+        return self._jsonlite.insert_one(document)
+    
+    def insert_many(self, documents: List[Dict[str, Any]]) -> InsertManyResult:
+        """Insert multiple documents."""
+        return self._jsonlite.insert_many(documents)
+    
+    def find(self, filter: Optional[Dict[str, Any]] = None) -> Cursor:
+        """Find documents matching filter."""
+        return self._jsonlite.find(filter or {})
+    
+    def find_one(self, filter: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Find a single document."""
+        return self._jsonlite.find_one(filter or {})
+    
+    def find_one_and_delete(self, filter: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Find and delete a single document."""
+        return self._jsonlite.find_one_and_delete(filter)
+    
+    def find_one_and_replace(self, filter: Dict[str, Any], replacement: Dict[str, Any], upsert: bool = False) -> Optional[Dict[str, Any]]:
+        """Find and replace a single document."""
+        return self._jsonlite.find_one_and_replace(filter, replacement)
+    
+    def find_one_and_update(self, filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False) -> Optional[Dict[str, Any]]:
+        """Find and update a single document."""
+        return self._jsonlite.find_one_and_update(filter, update)
+    
+    def update_one(self, filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False) -> UpdateResult:
+        """Update a single document."""
+        return self._jsonlite.update_one(filter, update, upsert)
+    
+    def update_many(self, filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False) -> UpdateResult:
+        """Update multiple documents."""
+        return self._jsonlite.update_many(filter, update, upsert)
+    
+    def replace_one(self, filter: Dict[str, Any], replacement: Dict[str, Any], upsert: bool = False) -> UpdateResult:
+        """Replace a single document."""
+        return self._jsonlite.replace_one(filter, replacement, upsert)
+    
+    def delete_one(self, filter: Dict[str, Any]) -> DeleteResult:
+        """Delete a single document."""
+        return self._jsonlite.delete_one(filter)
+    
+    def delete_many(self, filter: Dict[str, Any]) -> DeleteResult:
+        """Delete multiple documents."""
+        return self._jsonlite.delete_many(filter)
+    
+    def count_documents(self, filter: Dict[str, Any]) -> int:
+        """Count documents matching filter."""
+        return self._jsonlite.count_documents(filter)
+    
+    def distinct(self, key: str, filter: Optional[Dict[str, Any]] = None) -> List[Any]:
+        """Get distinct values for a key."""
+        return self._jsonlite.distinct(key, filter)
+    
+    def aggregate(self, pipeline: List[Dict[str, Any]]) -> AggregationCursor:
+        """Run aggregation pipeline."""
+        return self._jsonlite.aggregate(pipeline)
+    
+    def create_index(self, keys: Union[str, List[Tuple[str, int]]], unique: bool = False, sparse: bool = False, name: Optional[str] = None) -> str:
+        """Create an index."""
+        return self._jsonlite.create_index(keys, unique, sparse, name)
+    
+    def drop_index(self, index_or_name: Union[str, List[Tuple[str, int]]]) -> None:
+        """Drop an index."""
+        return self._jsonlite.drop_index(index_or_name)
+    
+    def list_indexes(self) -> List[Dict[str, Any]]:
+        """List all indexes."""
+        return self._jsonlite.list_indexes()
+    
+    def drop(self) -> None:
+        """Drop the collection (delete the file)."""
+        if os.path.exists(self._collection_file):
+            os.remove(self._collection_file)
+        # Also drop associated index files
+        index_dir = self._db_path
+        for f in os.listdir(index_dir):
+            if f.startswith(f"{self._name}_indexes_"):
+                os.remove(os.path.join(index_dir, f))
+    
+    def create_fulltext_index(self, fields: List[str], name: Optional[str] = None) -> str:
+        """Create a full-text index."""
+        return self._jsonlite.create_fulltext_index(fields, name)
+    
+    def drop_fulltext_index(self, name: str) -> None:
+        """Drop a full-text index."""
+        return self._jsonlite.drop_fulltext_index(name)
+    
+    def transaction(self):
+        """Create a transaction context."""
+        return self._jsonlite.transaction()
+    
+    def __repr__(self) -> str:
+        return f"Collection({self._database!r}, {self._name!r})"
+
+
+class Database:
+    """A database containing multiple collections (wraps a directory of JSON files).
+    
+    This class provides a pymongo-compatible interface to manage multiple collections.
+    Each collection is stored as a separate JSON file in the database directory.
+    """
+    
+    def __init__(self, client: 'MongoClient', name: str):
+        """Initialize a database.
+        
+        Args:
+            client: Parent MongoClient instance
+            name: Database name (used as directory name)
+        """
+        self._client = client
+        self._name = name
+        self._db_path = os.path.join(client._data_dir, name)
+        
+        # Create database directory if it doesn't exist
+        if not os.path.exists(self._db_path):
+            os.makedirs(self._db_path)
+        
+        # Cache for collections
+        self._collections: Dict[str, Collection] = {}
+    
+    @property
+    def name(self) -> str:
+        """Get database name."""
+        return self._name
+    
+    @property
+    def client(self) -> 'MongoClient':
+        """Get parent client."""
+        return self._client
+    
+    def __getitem__(self, name: str) -> Collection:
+        """Get a collection by name (dict-style access).
+        
+        Args:
+            name: Collection name
+        
+        Returns:
+            Collection instance
+        """
+        if name not in self._collections:
+            self._collections[name] = Collection(self, name)
+        return self._collections[name]
+    
+    def __getattr__(self, name: str) -> Collection:
+        """Get a collection by attribute access.
+        
+        Args:
+            name: Collection name
+        
+        Returns:
+            Collection instance
+        """
+        if name.startswith('_'):
+            raise AttributeError(f"Database has no attribute '{name}'")
+        return self[name]
+    
+    def get_collection(self, name: str) -> Collection:
+        """Get a collection by name.
+        
+        Args:
+            name: Collection name
+        
+        Returns:
+            Collection instance
+        """
+        return self[name]
+    
+    def list_collection_names(self) -> List[str]:
+        """List all collection names in the database.
+        
+        Returns:
+            List of collection names
+        """
+        collections = []
+        if os.path.exists(self._db_path):
+            for f in os.listdir(self._db_path):
+                if f.endswith('.json'):
+                    collections.append(f[:-5])  # Remove .json extension
+        return collections
+    
+    def list_collections(self) -> List[Dict[str, Any]]:
+        """List all collections with metadata.
+        
+        Returns:
+            List of collection info dicts
+        """
+        collections = []
+        for name in self.list_collection_names():
+            collection = self[name]
+            count = collection.count_documents({})
+            collections.append({
+                'name': name,
+                'type': 'collection',
+                'options': {},
+                'info': {
+                    'readOnly': False,
+                    'uuid': None
+                }
+            })
+        return collections
+    
+    def create_collection(self, name: str, **kwargs) -> Collection:
+        """Create a new collection.
+        
+        Args:
+            name: Collection name
+            **kwargs: Additional options (ignored for compatibility)
+        
+        Returns:
+            Collection instance
+        """
+        # Collection is created on first access
+        return self[name]
+    
+    def drop_collection(self, name: str) -> None:
+        """Drop a collection.
+        
+        Args:
+            name: Collection name
+        """
+        if name in self._collections:
+            self._collections[name].drop()
+            del self._collections[name]
+        else:
+            # Create temp collection to drop it
+            temp = Collection(self, name)
+            temp.drop()
+    
+    def drop_database(self) -> None:
+        """Drop the entire database (delete all files and directory)."""
+        import shutil
+        if os.path.exists(self._db_path):
+            shutil.rmtree(self._db_path)
+        # Remove from client cache
+        if self._name in self._client._databases:
+            del self._client._databases[self._name]
+    
+    def command(self, command: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Run a database command.
+        
+        Args:
+            command: Command name or command document
+        
+        Returns:
+            Command result
+        """
+        if isinstance(command, str):
+            command = {command: 1}
+        
+        cmd_name = list(command.keys())[0]
+        
+        if cmd_name == 'ping':
+            return {'ok': 1.0}
+        elif cmd_name == 'serverStatus':
+            return {
+                'ok': 1.0,
+                'db': self._name,
+                'collections': len(self.list_collection_names())
+            }
+        elif cmd_name == 'listCollections':
+            return {
+                'ok': 1.0,
+                'cursor': {
+                    'firstBatch': self.list_collections(),
+                    'id': 0
+                }
+            }
+        
+        raise NotImplementedError(f"Command '{cmd_name}' not implemented")
+    
+    def __repr__(self) -> str:
+        return f"Database({self._client!r}, {self._name!r})"
+
+
+class MongoClient:
+    """MongoDB-compatible client for managing multiple databases.
+    
+    This class provides a pymongo-compatible interface to manage multiple
+    database files. Each database is stored as a directory containing
+    JSON files (one per collection).
+    
+    Usage:
+        from jsonlite import MongoClient
+        
+        # Connect to a data directory
+        client = MongoClient('/path/to/data')
+        
+        # Get a database
+        db = client['mydb']
+        # or
+        db = client.mydb
+        
+        # Get a collection
+        collection = db['users']
+        # or
+        collection = db.users
+        
+        # Use like normal
+        collection.insert_one({"name": "Alice", "age": 30})
+        results = collection.find({"age": {"$gte": 25}}).toArray()
+    """
+    
+    def __init__(self, data_dir: str = './jsonlite_data', **kwargs):
+        """Initialize MongoClient.
+        
+        Args:
+            data_dir: Base directory for all databases (default: './jsonlite_data')
+            **kwargs: Additional options (ignored for compatibility)
+        """
+        self._data_dir = data_dir
+        self._databases: Dict[str, Database] = {}
+        
+        # Create data directory if it doesn't exist
+        if not os.path.exists(self._data_dir):
+            os.makedirs(self._data_dir)
+        
+        # For pymongo compatibility
+        self.HOST = 'localhost'
+        self.PORT = 27017
+    
+    def __getitem__(self, name: str) -> Database:
+        """Get a database by name (dict-style access).
+        
+        Args:
+            name: Database name
+        
+        Returns:
+            Database instance
+        """
+        if name not in self._databases:
+            self._databases[name] = Database(self, name)
+        return self._databases[name]
+    
+    def __getattr__(self, name: str) -> Database:
+        """Get a database by attribute access.
+        
+        Args:
+            name: Database name
+        
+        Returns:
+            Database instance
+        """
+        if name.startswith('_'):
+            raise AttributeError(f"MongoClient has no attribute '{name}'")
+        return self[name]
+    
+    def get_database(self, name: str) -> Database:
+        """Get a database by name.
+        
+        Args:
+            name: Database name
+        
+        Returns:
+            Database instance
+        """
+        return self[name]
+    
+    def list_database_names(self) -> List[str]:
+        """List all database names.
+        
+        Returns:
+            List of database names (directory names)
+        """
+        databases = []
+        if os.path.exists(self._data_dir):
+            for name in os.listdir(self._data_dir):
+                db_path = os.path.join(self._data_dir, name)
+                if os.path.isdir(db_path):
+                    databases.append(name)
+        return databases
+    
+    def list_databases(self) -> List[Dict[str, Any]]:
+        """List all databases with metadata.
+        
+        Returns:
+            List of database info dicts
+        """
+        databases = []
+        for name in self.list_database_names():
+            db = self[name]
+            collections = len(db.list_collection_names())
+            databases.append({
+                'name': name,
+                'sizeOnDisk': self._get_db_size(db._db_path),
+                'empty': collections == 0
+            })
+        return databases
+    
+    def _get_db_size(self, path: str) -> int:
+        """Get total size of database directory in bytes."""
+        total = 0
+        if os.path.exists(path):
+            for f in os.listdir(path):
+                fpath = os.path.join(path, f)
+                if os.path.isfile(fpath):
+                    total += os.path.getsize(fpath)
+        return total
+    
+    def drop_database(self, name_or_database: Union[str, Database]) -> None:
+        """Drop a database.
+        
+        Args:
+            name_or_database: Database name or Database instance
+        """
+        if isinstance(name_or_database, Database):
+            name_or_database.drop_database()
+        else:
+            if name_or_database in self._databases:
+                self._databases[name_or_database].drop_database()
+            else:
+                temp = Database(self, name_or_database)
+                temp.drop_database()
+    
+    def close(self) -> None:
+        """Close the client connection (no-op for JSONlite)."""
+        pass
+    
+    def server_info(self) -> Dict[str, Any]:
+        """Get server information.
+        
+        Returns:
+            Server info dict
+        """
+        return {
+            'version': '1.1.0',
+            'versionArray': [1, 1, 0],
+            'ok': 1.0
+        }
+    
+    def admin_command(self, command: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Run an admin command.
+        
+        Args:
+            command: Command name or command document
+        
+        Returns:
+            Command result
+        """
+        if isinstance(command, str):
+            command = {command: 1}
+        
+        cmd_name = list(command.keys())[0]
+        
+        if cmd_name == 'ping':
+            return {'ok': 1.0}
+        elif cmd_name == 'buildInfo':
+            return {
+                'ok': 1.0,
+                'version': '1.1.0',
+                'versionArray': [1, 1, 0]
+            }
+        
+        raise NotImplementedError(f"Admin command '{cmd_name}' not implemented")
+    
+    def __repr__(self) -> str:
+        return f"MongoClient({self._data_dir!r})"
+
+
+# Export for convenience
+__all__ = ['JSONlite', 'MongoClient', 'Database', 'Collection', 'Cursor', 'AggregationCursor', 'Transaction', 'TransactionError']
