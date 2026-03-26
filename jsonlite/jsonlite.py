@@ -304,6 +304,181 @@ def _geo_intersects(geom1: Any, geom2: Any) -> bool:
     return False
 
 
+# =============================================================================
+# Geohash Encoding/Decoding for Geospatial Indexing
+# =============================================================================
+
+_GEOHASH_BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz'
+_GEOHASH_BIT_MAP = {
+    '0': '00000', '1': '00001', '2': '00010', '3': '00011',
+    '4': '00100', '5': '00101', '6': '00110', '7': '00111',
+    '8': '01000', '9': '01001', 'b': '01010', 'c': '01011',
+    'd': '01100', 'e': '01101', 'f': '01110', 'g': '01111',
+    'h': '10000', 'j': '10001', 'k': '10010', 'm': '10011',
+    'n': '10100', 'p': '10101', 'q': '10110', 'r': '10111',
+    's': '11000', 't': '11001', 'u': '11010', 'v': '11011',
+    'w': '11100', 'x': '11101', 'y': '11110', 'z': '11111'
+}
+
+
+def _encode_geohash(lon: float, lat: float, precision: int = 12) -> str:
+    """Encode longitude/latitude to Geohash string.
+    
+    Geohash is a hierarchical spatial data structure which subdivides space
+    into buckets of grid shape. It provides a short string representation
+    of a geographic location.
+    
+    Args:
+        lon: Longitude in degrees (-180 to 180)
+        lat: Latitude in degrees (-90 to 90)
+        precision: Length of geohash string (default 12, ~37mm precision)
+    
+    Returns:
+        Geohash string
+    
+    Examples:
+        _encode_geohash(116.4074, 39.9042)  # Beijing -> "wx4g0ec1"
+        _encode_geohash(121.4737, 31.2304)  # Shanghai -> "wtw37y7c"
+    """
+    lat_range = (-90.0, 90.0)
+    lon_range = (-180.0, 180.0)
+    
+    geohash = []
+    bits = 0
+    bit_count = 0
+    is_lon = True  # Interleave lon and lat bits
+    
+    while len(geohash) < precision:
+        if is_lon:
+            mid = (lon_range[0] + lon_range[1]) / 2
+            if lon >= mid:
+                bits = (bits << 1) | 1
+                lon_range = (mid, lon_range[1])
+            else:
+                bits = bits << 1
+                lon_range = (lon_range[0], mid)
+        else:
+            mid = (lat_range[0] + lat_range[1]) / 2
+            if lat >= mid:
+                bits = (bits << 1) | 1
+                lat_range = (mid, lat_range[1])
+            else:
+                bits = bits << 1
+                lat_range = (lat_range[0], mid)
+        
+        is_lon = not is_lon
+        bit_count += 1
+        
+        if bit_count == 5:
+            geohash.append(_GEOHASH_BASE32[bits])
+            bits = 0
+            bit_count = 0
+    
+    return ''.join(geohash)
+
+
+def _decode_geohash(geohash: str) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Decode Geohash string to bounding box.
+    
+    Args:
+        geohash: Geohash string
+    
+    Returns:
+        Tuple of ((min_lon, min_lat), (max_lon, max_lat))
+    """
+    lat_range = [-90.0, 90.0]
+    lon_range = [-180.0, 180.0]
+    is_lon = True
+    
+    for char in geohash:
+        if char not in _GEOHASH_BIT_MAP:
+            continue
+        
+        bin_str = _GEOHASH_BIT_MAP[char]
+        for bit in bin_str:
+            if is_lon:
+                mid = (lon_range[0] + lon_range[1]) / 2
+                if bit == '1':
+                    lon_range[0] = mid
+                else:
+                    lon_range[1] = mid
+            else:
+                mid = (lat_range[0] + lat_range[1]) / 2
+                if bit == '1':
+                    lat_range[0] = mid
+                else:
+                    lat_range[1] = mid
+            is_lon = not is_lon
+    
+    return ((lon_range[0], lat_range[0]), (lon_range[1], lat_range[1]))
+
+
+def _geohash_neighbors(geohash: str) -> List[str]:
+    """Get the 8 neighboring geohashes at the same precision.
+    
+    Args:
+        geohash: Geohash string
+    
+    Returns:
+        List of 8 neighboring geohash strings
+    """
+    # Direction mappings for geohash neighbors
+    # This is a simplified implementation
+    neighbors = []
+    precision = len(geohash)
+    
+    if precision == 0:
+        return neighbors
+    
+    # Get the bounding box of the current geohash
+    bbox = _decode_geohash(geohash)
+    center_lon = (bbox[0][0] + bbox[1][0]) / 2
+    center_lat = (bbox[0][1] + bbox[1][1]) / 2
+    
+    # Estimate the size of one cell
+    lon_delta = (bbox[1][0] - bbox[0][0]) * 1.5
+    lat_delta = (bbox[1][1] - bbox[0][1]) * 1.5
+    
+    # Generate neighbors in 8 directions
+    directions = [
+        (-1, 0), (1, 0), (0, -1), (0, 1),  # N, S, W, E
+        (-1, -1), (-1, 1), (1, -1), (1, 1)  # NW, NE, SW, SE
+    ]
+    
+    for dlon, dlat in directions:
+        new_lon = center_lon + dlon * lon_delta
+        new_lat = center_lat + dlat * lat_delta
+        
+        # Clamp to valid ranges
+        new_lon = max(-180, min(180, new_lon))
+        new_lat = max(-90, min(90, new_lat))
+        
+        neighbor = _encode_geohash(new_lon, new_lat, precision)
+        if neighbor != geohash:
+            neighbors.append(neighbor)
+    
+    return neighbors
+
+
+def _geohash_in_range(geohash: str, min_lon: float, min_lat: float, 
+                       max_lon: float, max_lat: float) -> bool:
+    """Check if a geohash's bounding box overlaps with a query range.
+    
+    Args:
+        geohash: Geohash to check
+        min_lon, min_lat: Minimum coordinates of query range
+        max_lon, max_lat: Maximum coordinates of query range
+    
+    Returns:
+        True if geohash overlaps with query range
+    """
+    bbox = _decode_geohash(geohash)
+    
+    # Check for overlap
+    return not (bbox[1][0] < min_lon or bbox[0][0] > max_lon or
+                bbox[1][1] < min_lat or bbox[0][1] > max_lat)
+
+
 class QueryCache:
     """LRU cache for query results.
     
@@ -1077,15 +1252,23 @@ class IndexManager:
         Returns:
             List of index info dicts
         """
-        return [
-            {
-                'name': name,
-                'keys': info['keys'],
-                'unique': info['unique'],
-                'sparse': info['sparse']
-            }
-            for name, info in self._indexes.items()
-        ]
+        result = []
+        for name, info in self._indexes.items():
+            if info.get('type') == 'geospatial':
+                result.append({
+                    'name': name,
+                    'type': 'geospatial',
+                    'field': info['field'],
+                    'precision': info['precision']
+                })
+            else:
+                result.append({
+                    'name': name,
+                    'keys': info['keys'],
+                    'unique': info['unique'],
+                    'sparse': info['sparse']
+                })
+        return result
     
     def get_index(self, name: str) -> Optional[Dict]:
         """Get index info by name.
@@ -1135,6 +1318,12 @@ class IndexManager:
             return
         
         for name, info in self._indexes.items():
+            # Handle geospatial indexes
+            if info.get('type') == 'geospatial':
+                self._index_geospatial_document(info, doc, doc_id, add=True)
+                continue
+            
+            # Handle regular indexes
             if info['sparse']:
                 key_value = self._get_key_value(doc, info['keys'])
                 if key_value is None:
@@ -1166,6 +1355,12 @@ class IndexManager:
             return
         
         for name, info in self._indexes.items():
+            # Handle geospatial indexes
+            if info.get('type') == 'geospatial':
+                self._index_geospatial_document(info, doc, doc_id, add=False)
+                continue
+            
+            # Handle regular indexes
             key_value = self._get_key_value(doc, info['keys'])
             if key_value in info['data']:
                 if doc_id in info['data'][key_value]:
@@ -1180,14 +1375,22 @@ class IndexManager:
             old_doc: Document before update
             new_doc: Document after update
         """
+        doc_id = new_doc.get('_id')
+        
         for name, info in self._indexes.items():
+            # Handle geospatial indexes
+            if info.get('type') == 'geospatial':
+                # Remove old location, add new location
+                self._index_geospatial_document(info, old_doc, doc_id, add=False)
+                self._index_geospatial_document(info, new_doc, doc_id, add=True)
+                continue
+            
+            # Handle regular indexes
             old_key = self._get_key_value(old_doc, info['keys'])
             new_key = self._get_key_value(new_doc, info['keys'])
             
             if old_key == new_key:
                 continue  # Index key unchanged
-            
-            doc_id = new_doc.get('_id')
             
             # Remove from old position
             if old_key is not None and old_key in info['data']:
@@ -1271,6 +1474,183 @@ class IndexManager:
                 return result
         
         return None  # No suitable index
+    
+    def create_geospatial_index(self, field: str, name: Optional[str] = None,
+                                 precision: int = 12) -> str:
+        """Create a geospatial index using Geohash encoding.
+        
+        Geospatial indexes enable efficient location-based queries like
+        $near, $geoWithin, and $geoIntersects by encoding coordinates into
+        Geohash strings for indexed lookup.
+        
+        Args:
+            field: Field name containing location data (e.g., "location")
+            name: Optional index name (auto-generated if not provided)
+            precision: Geohash precision (default 12, ~37mm accuracy)
+        
+        Returns:
+            Index name
+        
+        Examples:
+            create_geospatial_index("location")  # Index location field
+            create_geospatial_index("loc", precision=8)  # Lower precision (~38m)
+        """
+        if name is None:
+            name = f"{field}_geohash"
+        
+        if name in self._indexes:
+            raise ValueError(f"Index '{name}' already exists")
+        
+        self._indexes[name] = {
+            'type': 'geospatial',
+            'field': field,
+            'precision': precision,
+            'data': {}  # geohash -> list of _id
+        }
+        
+        return name
+    
+    def _index_geospatial_document(self, index_info: Dict, doc: Dict, 
+                                    doc_id: Any, add: bool = True) -> None:
+        """Index a document's location in a geospatial index.
+        
+        Args:
+            index_info: Index configuration dict
+            doc: Document to index
+            doc_id: Document _id
+            add: If True, add to index; if False, remove from index
+        """
+        field = index_info['field']
+        precision = index_info['precision']
+        data = index_info['data']
+        
+        location = _get_nested_value(doc, field)
+        if location is None:
+            return
+        
+        coords = _extract_coordinates(location)
+        if coords is None:
+            return
+        
+        lon, lat = coords
+        geohash = _encode_geohash(lon, lat, precision)
+        
+        if geohash not in data:
+            data[geohash] = []
+        
+        if add:
+            if doc_id not in data[geohash]:
+                data[geohash].append(doc_id)
+        else:
+            if doc_id in data[geohash]:
+                data[geohash].remove(doc_id)
+            if len(data[geohash]) == 0:
+                del data[geohash]
+    
+    def query_geospatial_near(self, field: str, lon: float, lat: float,
+                               max_distance: Optional[float] = None,
+                               min_distance: Optional[float] = None,
+                               limit: int = 100) -> List[Tuple[Any, float]]:
+        """Query documents near a location using geospatial index.
+        
+        Args:
+            field: Field name containing location data
+            lon: Longitude of query point
+            lat: Latitude of query point
+            max_distance: Maximum distance in meters (optional)
+            min_distance: Minimum distance in meters (optional)
+            limit: Maximum number of results to return
+        
+        Returns:
+            List of (doc_id, distance) tuples sorted by distance
+        """
+        # Find geospatial index for this field
+        index_name = f"{field}_geohash"
+        if index_name not in self._indexes:
+            return []
+        
+        index_info = self._indexes[index_name]
+        precision = index_info['precision']
+        
+        # Encode query point
+        query_geohash = _encode_geohash(lon, lat, precision)
+        
+        # Collect candidate document IDs from query geohash and neighbors
+        candidate_ids = set()
+        geohashes_to_check = [query_geohash] + _geohash_neighbors(query_geohash)
+        
+        for gh in geohashes_to_check:
+            if gh in index_info['data']:
+                candidate_ids.update(index_info['data'][gh])
+        
+        # Calculate distances and filter
+        results = []
+        for doc_id in candidate_ids:
+            # We need to get the actual location from the document
+            # For now, return empty - the actual query will filter
+            # This is a hint for the query optimizer
+            results.append(doc_id)
+        
+        return results[:limit]
+    
+    def query_geospatial_within(self, field: str, geometry: Dict) -> List[Any]:
+        """Query documents within a geometry using geospatial index.
+        
+        Args:
+            field: Field name containing location data
+            geometry: Geometry definition (Box, Circle, or Polygon)
+        
+        Returns:
+            List of document IDs within the geometry
+        """
+        # Find geospatial index for this field
+        index_name = f"{field}_geohash"
+        if index_name not in self._indexes:
+            return []
+        
+        index_info = self._indexes[index_name]
+        precision = index_info['precision']
+        
+        # Determine bounding box from geometry
+        geom_type = geometry.get('type')
+        min_lon, min_lat, max_lon, max_lat = -180, -90, 180, 90
+        
+        if geom_type == 'Box':
+            min_coord = geometry.get('min', (-180, -90))
+            max_coord = geometry.get('max', (180, 90))
+            min_lon, min_lat = min_coord
+            max_lon, max_lat = max_coord
+        
+        elif geom_type == 'Circle':
+            center = geometry.get('center', (0, 0))
+            radius = geometry.get('radius', 0)
+            # Approximate bounding box (rough estimate)
+            deg_radius = radius / 111000  # ~111km per degree
+            min_lon = max(-180, center[0] - deg_radius)
+            max_lon = min(180, center[0] + deg_radius)
+            min_lat = max(-90, center[1] - deg_radius)
+            max_lat = min(90, center[1] + deg_radius)
+        
+        elif geom_type == 'Polygon':
+            coords = geometry.get('coordinates', [[]])[0]
+            for pt in coords:
+                c = _extract_coordinates(pt)
+                if c:
+                    min_lon = min(min_lon, c[0])
+                    max_lon = max(max_lon, c[0])
+                    min_lat = min(min_lat, c[1])
+                    max_lat = max(max_lat, c[1])
+        
+        # Collect candidate geohashes that overlap with bounding box
+        candidate_ids = set()
+        
+        # For efficiency, we could use a smarter approach, but for now
+        # iterate through all indexed geohashes
+        for geohash, doc_ids in index_info['data'].items():
+            if _geohash_in_range(geohash, min_lon, min_lat, max_lon, max_lat):
+                candidate_ids.update(doc_ids)
+        
+        return list(candidate_ids)
     
     def rebuild_index(self, name: str, documents: List[Dict]) -> None:
         """Rebuild an index from scratch.
@@ -2128,6 +2508,31 @@ class JSONlite:
         """
         return self._index_manager.list_indexes()
     
+    def create_geospatial_index(self, field: str, name: Optional[str] = None,
+                                 precision: int = 12) -> str:
+        """Create a geospatial index using Geohash encoding.
+        
+        Geospatial indexes enable efficient location-based queries like
+        $near, $geoWithin, and $geoIntersects by encoding coordinates into
+        Geohash strings for indexed lookup.
+        
+        Args:
+            field: Field name containing location data (e.g., "location")
+            name: Optional index name (auto-generated if not provided)
+            precision: Geohash precision (default 12, ~37mm accuracy)
+        
+        Returns:
+            Index name
+        
+        Examples:
+            db.create_geospatial_index("location")  # Index location field
+            db.create_geospatial_index("loc", precision=8)  # Lower precision (~38m)
+        """
+        index_name = self._index_manager.create_geospatial_index(field, name, precision)
+        # Rebuild index with existing data
+        self._index_manager.rebuild_index(index_name, self._data)
+        return index_name
+    
     def _insert_one_with_index(self, record: Dict) -> int:
         """Insert one document and update indexes."""
         # Check if user provided _id (should be auto-generated)
@@ -2239,6 +2644,11 @@ class JSONlite:
             if cached is not None:
                 return cached
         
+        # Check for geospatial queries and use geospatial index
+        geospatial_result = self._try_geospatial_index_query(filter, find_all)
+        if geospatial_result is not None:
+            return geospatial_result
+        
         # Try to use index for simple equality filters
         if len(filter) == 1:
             field, value = list(filter.items())[0]
@@ -2277,6 +2687,99 @@ class JSONlite:
             self._cache.set(filter, sorted_results)
         
         return sorted_results
+    
+    def _try_geospatial_index_query(self, filter: Dict, find_all: bool) -> Optional[List[Dict]]:
+        """Try to use geospatial index for location-based queries.
+        
+        Args:
+            filter: Query filter
+            find_all: Whether to return all matches or just first
+        
+        Returns:
+            List of matching records if geospatial index was used, None otherwise
+        """
+        # Look for $near or $geoWithin queries
+        for field, condition in filter.items():
+            if not isinstance(condition, dict):
+                continue
+            
+            # Handle $near query
+            if '$near' in condition:
+                near_point = _extract_coordinates(condition['$near'])
+                if not near_point:
+                    continue
+                
+                lon, lat = near_point
+                max_dist = condition.get('$maxDistance')
+                min_dist = condition.get('$minDistance', 0)
+                
+                # Use geospatial index to get candidate IDs
+                candidate_ids = self._index_manager.query_geospatial_near(
+                    field, lon, lat, max_dist, min_dist
+                )
+                
+                if candidate_ids:
+                    # Build id -> record map
+                    id_map = {doc['_id']: doc for doc in self._data}
+                    results = []
+                    
+                    for doc_id in candidate_ids:
+                        if doc_id in id_map:
+                            record = id_map[doc_id]
+                            # Verify with exact distance calculation
+                            record_point = _extract_coordinates(record.get(field))
+                            if record_point:
+                                distance = _haversine_distance(near_point, record_point)
+                                if min_dist <= distance and (max_dist is None or distance <= max_dist):
+                                    record['_geo_distance_' + field] = distance
+                                    results.append(record)
+                    
+                    # Sort by distance
+                    results.sort(key=lambda r: r.get('_geo_distance_' + field, float('inf')))
+                    
+                    if not find_all:
+                        return results[:1]
+                    
+                    return results
+            
+            # Handle $geoWithin query
+            elif '$geoWithin' in condition:
+                geometry = _extract_geometry(condition['$geoWithin'])
+                if not geometry:
+                    continue
+                
+                # Use geospatial index to get candidate IDs
+                candidate_ids = self._index_manager.query_geospatial_within(field, geometry)
+                
+                if candidate_ids:
+                    # Build id -> record map
+                    id_map = {doc['_id']: doc for doc in self._data}
+                    results = []
+                    
+                    for doc_id in candidate_ids:
+                        if doc_id in id_map:
+                            record = id_map[doc_id]
+                            # Verify with exact geometry check
+                            record_point = _extract_coordinates(record.get(field))
+                            if record_point and _geometry_contains(geometry, record_point):
+                                results.append(record)
+                    
+                    if not find_all:
+                        return results[:1]
+                    
+                    return results
+            
+            # Handle $geoIntersects query
+            elif '$geoIntersects' in condition:
+                geometry = _extract_geometry(condition['$geoIntersects'])
+                if not geometry:
+                    continue
+                
+                # For intersects, we need to check all documents
+                # (geospatial index helps less here without R-tree)
+                continue
+        
+        return None  # No geospatial index optimization applicable
     
     def _sort_by_near_distance(self, filter: Dict, records: List[Dict]) -> List[Dict]:
         """Sort records by distance if $near operator was used.

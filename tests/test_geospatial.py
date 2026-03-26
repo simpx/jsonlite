@@ -299,5 +299,173 @@ class TestGeoIntersects:
         assert "Beijing Office" in names
 
 
+class TestGeospatialIndex:
+    """Test geospatial indexing with Geohash."""
+    
+    def test_create_geospatial_index(self, db):
+        """Test creating a geospatial index."""
+        index_name = db.create_geospatial_index("location")
+        
+        assert index_name == "location_geohash"
+        
+        indexes = db.list_indexes()
+        geo_indexes = [i for i in indexes if i.get('type') == 'geospatial']
+        
+        assert len(geo_indexes) == 1
+        assert geo_indexes[0]['field'] == "location"
+        assert geo_indexes[0]['precision'] == 12
+    
+    def test_create_geospatial_index_custom_precision(self, db):
+        """Test creating a geospatial index with custom precision."""
+        index_name = db.create_geospatial_index("location", precision=8)
+        
+        assert index_name == "location_geohash"
+        
+        indexes = db.list_indexes()
+        geo_indexes = [i for i in indexes if i.get('type') == 'geospatial']
+        
+        assert len(geo_indexes) == 1
+        assert geo_indexes[0]['precision'] == 8
+    
+    def test_create_geospatial_index_custom_name(self, db):
+        """Test creating a geospatial index with custom name."""
+        index_name = db.create_geospatial_index("location", name="my_geo_index")
+        
+        assert index_name == "my_geo_index"
+        
+        indexes = db.list_indexes()
+        geo_index_names = [i['name'] for i in indexes if i.get('type') == 'geospatial']
+        
+        assert "my_geo_index" in geo_index_names
+    
+    def test_geospatial_index_auto_populated(self, db):
+        """Test that existing documents are indexed when creating geospatial index."""
+        # Create index after inserting documents
+        db.create_geospatial_index("location", precision=8)
+        
+        # Query should use the index
+        results = db.find({
+            "location": {
+                "$near": [116.4074, 39.9042],
+                "$maxDistance": 50000  # 50km
+            }
+        })
+        
+        assert len(results) > 0
+        assert results[0]["name"] == "Beijing Office"
+    
+    def test_geospatial_index_updated_on_insert(self, db):
+        """Test that new documents are added to geospatial index."""
+        db.create_geospatial_index("location", precision=8)
+        
+        # Insert new document
+        db.insert_one({
+            "name": "Tianjin Office",
+            "location": [117.2008, 39.0842]
+        })
+        
+        # Query should find the new document
+        results = db.find({
+            "location": {
+                "$near": [117.2008, 39.0842],
+                "$maxDistance": 10000  # 10km
+            }
+        })
+        
+        assert len(results) > 0
+        names = [r["name"] for r in results]
+        assert "Tianjin Office" in names
+    
+    def test_geospatial_index_updated_on_update(self, db):
+        """Test that updated documents are re-indexed."""
+        db.create_geospatial_index("location", precision=8)
+        
+        # Update document's location
+        db.update_one(
+            {"name": "Beijing Office"},
+            {"$set": {"location": [117.2008, 39.0842]}}  # Move to Tianjin
+        )
+        
+        # Query for Beijing location should not find it
+        results = db.find({
+            "location": {
+                "$near": [116.4074, 39.9042],
+                "$maxDistance": 10000  # 10km
+            }
+        })
+        
+        names = [r["name"] for r in results]
+        assert "Beijing Office" not in names
+    
+    def test_geospatial_index_updated_on_delete(self, db):
+        """Test that deleted documents are removed from geospatial index."""
+        db.create_geospatial_index("location", precision=8)
+        
+        # Delete document
+        db.delete_one({"name": "Beijing Office"})
+        
+        # Query should not find deleted document
+        results = db.find({
+            "location": {
+                "$near": [116.4074, 39.9042],
+                "$maxDistance": 10000
+            }
+        })
+        
+        names = [r["name"] for r in results]
+        assert "Beijing Office" not in names
+    
+    def test_geospatial_index_with_geoWithin(self, db):
+        """Test geospatial index optimization for $geoWithin queries."""
+        db.create_geospatial_index("location", precision=8)
+        
+        # Query with box
+        results = db.find({
+            "location": {
+                "$geoWithin": {
+                    "$box": [
+                        [116.0, 39.5],
+                        [117.0, 40.5]
+                    ]
+                }
+            }
+        })
+        
+        assert len(results) > 0
+        names = [r["name"] for r in results]
+        assert "Beijing Office" in names
+    
+    def test_geohash_encoding_decoding(self):
+        """Test Geohash encoding and decoding."""
+        from jsonlite.jsonlite import _encode_geohash, _decode_geohash
+        
+        # Encode Beijing coordinates
+        geohash = _encode_geohash(116.4074, 39.9042, precision=12)
+        assert len(geohash) == 12
+        
+        # Decode should give bounding box containing original point
+        bbox = _decode_geohash(geohash)
+        min_coord, max_coord = bbox
+        
+        assert min_coord[0] <= 116.4074 <= max_coord[0]
+        assert min_coord[1] <= 39.9042 <= max_coord[1]
+    
+    def test_geohash_neighbors(self):
+        """Test Geohash neighbor calculation."""
+        from jsonlite.jsonlite import _encode_geohash, _geohash_neighbors
+        
+        geohash = _encode_geohash(116.4074, 39.9042, precision=8)
+        neighbors = _geohash_neighbors(geohash)
+        
+        # Should have 8 neighbors
+        assert len(neighbors) == 8
+        
+        # Neighbors should be different from original
+        assert geohash not in neighbors
+        
+        # All neighbors should be same length
+        assert all(len(n) == 8 for n in neighbors)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
