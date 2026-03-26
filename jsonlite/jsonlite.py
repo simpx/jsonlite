@@ -1874,6 +1874,221 @@ def _matches_pull_condition(item: Any, condition: Dict) -> bool:
     return True
 
 
+class FullTextIndex:
+    """Full-text search index with inverted index and TF-IDF scoring.
+    
+    Features:
+    - Tokenization with stop word filtering
+    - Inverted index (word → document IDs)
+    - TF-IDF scoring for relevance ranking
+    - Automatic index maintenance on document changes
+    - Support for multiple indexed fields
+    
+    Example:
+        ft_index = FullTextIndex(fields=['title', 'content'])
+        ft_index.add_document({'_id': 1, 'title': 'Hello World', 'content': 'Test content'})
+        results = ft_index.search('hello')  # Returns [(doc_id, score), ...]
+    """
+    
+    # Common English stop words (filtered from search)
+    STOP_WORDS = {
+        'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 
+        'has', 'he', 'in', 'is', 'it', 'its', 'of', 'on', 'that', 'the', 
+        'to', 'was', 'were', 'will', 'with', 'this', 'but', 'they', 'have', 
+        'had', 'what', 'when', 'where', 'who', 'which', 'why', 'how', 
+        'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 
+        'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 
+        'than', 'too', 'very', 'can', 'just', 'should', 'now'
+    }
+    
+    def __init__(self, fields: List[str], name: str = "fulltext"):
+        """Initialize full-text index.
+        
+        Args:
+            fields: List of field names to index
+            name: Index name for identification
+        """
+        self.fields = fields
+        self.name = name
+        self._inverted_index: Dict[str, Set[int]] = {}  # word -> set of doc_ids
+        self._doc_lengths: Dict[int, int] = {}  # doc_id -> total word count
+        self._term_freqs: Dict[int, Dict[str, int]] = {}  # doc_id -> {word -> count}
+        self._num_docs = 0
+    
+    def _tokenize(self, text: str) -> List[str]:
+        """Tokenize text into words.
+        
+        Args:
+            text: Text to tokenize
+        
+        Returns:
+            List of lowercase words (stop words filtered)
+        """
+        if not text:
+            return []
+        
+        # Convert to lowercase and extract words (alphanumeric + underscore)
+        words = re.findall(r'\w+', str(text).lower())
+        
+        # Filter stop words and short words (< 2 chars)
+        return [w for w in words if w not in self.STOP_WORDS and len(w) >= 2]
+    
+    def _extract_text(self, doc: Dict) -> str:
+        """Extract text from indexed fields.
+        
+        Args:
+            doc: Document to extract text from
+        
+        Returns:
+            Combined text from all indexed fields
+        """
+        texts = []
+        for field in self.fields:
+            value = _get_nested_value(doc, field)
+            if value is not None:
+                texts.append(str(value))
+        return ' '.join(texts)
+    
+    def add_document(self, doc: Dict) -> None:
+        """Add a document to the index.
+        
+        Args:
+            doc: Document to index (must have '_id')
+        """
+        doc_id = doc.get('_id')
+        if doc_id is None:
+            return
+        
+        # Remove existing index for this doc (in case of update)
+        self.remove_document(doc)
+        
+        # Extract and tokenize text
+        text = self._extract_text(doc)
+        words = self._tokenize(text)
+        
+        if not words:
+            return
+        
+        # Update document count
+        self._num_docs += 1
+        
+        # Store document length
+        self._doc_lengths[doc_id] = len(words)
+        
+        # Store term frequencies
+        term_freq = {}
+        for word in words:
+            term_freq[word] = term_freq.get(word, 0) + 1
+            
+            # Add to inverted index
+            if word not in self._inverted_index:
+                self._inverted_index[word] = set()
+            self._inverted_index[word].add(doc_id)
+        
+        self._term_freqs[doc_id] = term_freq
+    
+    def remove_document(self, doc: Dict) -> None:
+        """Remove a document from the index.
+        
+        Args:
+            doc: Document to remove (must have '_id')
+        """
+        doc_id = doc.get('_id')
+        if doc_id is None:
+            return
+        
+        # Remove from inverted index
+        if doc_id in self._term_freqs:
+            for word in self._term_freqs[doc_id]:
+                if word in self._inverted_index:
+                    self._inverted_index[word].discard(doc_id)
+                    # Remove empty entries
+                    if not self._inverted_index[word]:
+                        del self._inverted_index[word]
+            
+            del self._term_freqs[doc_id]
+        
+        # Remove document length
+        if doc_id in self._doc_lengths:
+            del self._doc_lengths[doc_id]
+            self._num_docs = max(0, self._num_docs - 1)
+    
+    def _calculate_tf_idf(self, word: str, doc_id: int) -> float:
+        """Calculate TF-IDF score for a word in a document.
+        
+        Args:
+            word: Search word
+            doc_id: Document ID
+        
+        Returns:
+            TF-IDF score
+        """
+        # Term Frequency (TF): how often word appears in doc
+        tf = 0
+        if doc_id in self._term_freqs and word in self._term_freqs[doc_id]:
+            tf = self._term_freqs[doc_id][word]
+            # Normalize by document length
+            doc_len = self._doc_lengths.get(doc_id, 1)
+            tf = tf / doc_len
+        
+        # Inverse Document Frequency (IDF): how rare is the word
+        if word in self._inverted_index:
+            df = len(self._inverted_index[word])  # Document frequency
+            idf = math.log(self._num_docs / (1 + df)) + 1  # Smoothed IDF
+        else:
+            idf = 0
+        
+        return tf * idf
+    
+    def search(self, query: str, limit: Optional[int] = None) -> List[Tuple[int, float]]:
+        """Search for documents matching the query.
+        
+        Args:
+            query: Search query string
+            limit: Maximum number of results to return
+        
+        Returns:
+            List of (doc_id, score) tuples sorted by relevance (descending)
+        """
+        words = self._tokenize(query)
+        
+        if not words:
+            return []
+        
+        # Calculate scores for all matching documents
+        scores: Dict[int, float] = {}
+        
+        for word in words:
+            if word not in self._inverted_index:
+                continue
+            
+            for doc_id in self._inverted_index[word]:
+                score = self._calculate_tf_idf(word, doc_id)
+                scores[doc_id] = scores.get(doc_id, 0) + score
+        
+        # Sort by score (descending)
+        sorted_results = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+        
+        if limit:
+            sorted_results = sorted_results[:limit]
+        
+        return sorted_results
+    
+    def get_stats(self) -> Dict:
+        """Get index statistics.
+        
+        Returns:
+            Dict with vocabulary size, document count, etc.
+        """
+        return {
+            'name': self.name,
+            'fields': self.fields,
+            'vocabulary_size': len(self._inverted_index),
+            'num_documents': self._num_docs,
+            'avg_doc_length': sum(self._doc_lengths.values()) / max(1, self._num_docs)
+        }
+
+
 def _deep_equals(a: Any, b: Any) -> bool:
     """Deep equality check for dicts, lists, and primitives.
     
@@ -1924,6 +2139,7 @@ class JSONlite:
             '$geoIntersects': lambda v, c: _geo_intersects({'type': 'Point', 'coordinates': _extract_coordinates(v)}, _extract_geometry(c)) if _extract_coordinates(v) and _extract_geometry(c) else False,
         }
         self._index_manager = IndexManager()
+        self._fulltext_indexes: Dict[str, FullTextIndex] = {}  # name -> FullTextIndex
         self._index_metadata = []
         self._transaction_manager = TransactionManager(self)
         if not os.path.exists(filename):
@@ -2163,6 +2379,11 @@ class JSONlite:
             record["_id"] = self._generate_id()
             self._data.append(record)
             inserted_ids.append(record["_id"])
+            # Add to indexes
+            self._index_manager.add_document(record)
+            # Add to full-text indexes
+            for ft_index in self._fulltext_indexes.values():
+                ft_index.add_document(record)
         return inserted_ids
     
     def insert_many(self, records: List[Dict]) -> InsertManyResult:
@@ -2389,19 +2610,51 @@ class JSONlite:
         return distinct_values
 
     @_synchronized_read
-    def full_text_search(self, query: str) -> List[Dict]:
+    def full_text_search(self, query: str, limit: Optional[int] = None) -> List[Dict]:
         """Perform a full-text search on the database.
+        
+        Uses full-text index if available for optimized search with TF-IDF scoring.
+        Falls back to linear scan if no index exists.
         
         Args:
             query (str): The text to search for.
+            limit (Optional[int]): Maximum number of results to return.
         
         Returns:
-            List[Dict]: A list of documents that contain the query text.
+            List[Dict]: A list of documents that contain the query text,
+                       sorted by relevance (if index is used).
+        
+        Example:
+            >>> db.create_fulltext_index(['title', 'content'])
+            >>> results = db.full_text_search('python programming', limit=10)
         """
+        # Use full-text index if available
+        if self._fulltext_indexes:
+            # Use the first available full-text index
+            ft_index = next(iter(self._fulltext_indexes.values()))
+            
+            # Search using the index (returns doc_ids with scores)
+            search_results = ft_index.search(query, limit=limit)
+            
+            # Build a mapping of doc_id to score
+            score_map = {doc_id: score for doc_id, score in search_results}
+            
+            # Get documents by ID
+            id_to_doc = {doc.get('_id'): doc for doc in self._data}
+            results = []
+            for doc_id, score in search_results:
+                if doc_id in id_to_doc:
+                    results.append(id_to_doc[doc_id])
+            
+            return results
+        
+        # Fallback to linear scan (original behavior)
         results = []
         for record in self._data:
             if any(query in str(value) for value in record.values()):
                 results.append(record)
+                if limit and len(results) >= limit:
+                    break
         return results
     
     # ==================== Cache Management ====================
@@ -2533,6 +2786,80 @@ class JSONlite:
         self._index_manager.rebuild_index(index_name, self._data)
         return index_name
     
+    def create_fulltext_index(self, fields: List[str], name: Optional[str] = None) -> str:
+        """Create a full-text search index on specified field(s).
+        
+        Full-text indexes enable efficient text search with TF-IDF scoring,
+        tokenization, and stop word filtering. Much faster than linear scan
+        for large datasets.
+        
+        Args:
+            fields: List of field names to index (e.g., ['title', 'content'])
+            name: Optional index name (auto-generated if not provided)
+        
+        Returns:
+            Index name
+        
+        Examples:
+            db.create_fulltext_index(['title', 'content'])
+            db.create_fulltext_index(['name'], name='name_index')
+            
+            # Then search:
+            results = db.full_text_search('python programming', limit=10)
+        """
+        if not fields:
+            raise ValueError("At least one field must be specified for full-text index")
+        
+        # Generate index name if not provided
+        if name is None:
+            name = f"fulltext_{'_'.join(fields)}"
+        
+        if name in self._fulltext_indexes:
+            raise ValueError(f"Full-text index '{name}' already exists")
+        
+        # Create and build the index
+        ft_index = FullTextIndex(fields=fields, name=name)
+        
+        # Index all existing documents
+        for doc in self._data:
+            ft_index.add_document(doc)
+        
+        self._fulltext_indexes[name] = ft_index
+        
+        return name
+    
+    def drop_fulltext_index(self, name: str) -> bool:
+        """Drop a full-text index by name.
+        
+        Args:
+            name: Index name to drop
+        
+        Returns:
+            True if index was dropped, False if it didn't exist
+        """
+        if name in self._fulltext_indexes:
+            del self._fulltext_indexes[name]
+            return True
+        return False
+    
+    def drop_all_fulltext_indexes(self) -> int:
+        """Drop all full-text indexes.
+        
+        Returns:
+            Number of indexes dropped
+        """
+        count = len(self._fulltext_indexes)
+        self._fulltext_indexes.clear()
+        return count
+    
+    def list_fulltext_indexes(self) -> List[Dict]:
+        """List all full-text indexes.
+        
+        Returns:
+            List of index info dicts with name, fields, and statistics
+        """
+        return [idx.get_stats() for idx in self._fulltext_indexes.values()]
+    
     def _insert_one_with_index(self, record: Dict) -> int:
         """Insert one document and update indexes."""
         # Check if user provided _id (should be auto-generated)
@@ -2544,6 +2871,9 @@ class JSONlite:
         self._data.append(record_with_id)
         # Add to indexes
         self._index_manager.add_document(record_with_id)
+        # Add to full-text indexes
+        for ft_index in self._fulltext_indexes.values():
+            ft_index.add_document(record_with_id)
         # Invalidate cache on write
         if self._cache_enabled and self._cache:
             self._cache.clear()
@@ -2577,6 +2907,10 @@ class JSONlite:
                     modified_count += 1
                     # Update indexes
                     self._index_manager.update_document(old_record, new_record)
+                    # Update full-text indexes
+                    for ft_index in self._fulltext_indexes.values():
+                        ft_index.remove_document(old_record)
+                        ft_index.add_document(new_record)
                     self._data[idx] = new_record
                 
                 if not update_all:
@@ -2611,6 +2945,9 @@ class JSONlite:
             # Remove all from indexes
             for record in self._data:
                 self._index_manager.remove_document(record)
+                # Remove from full-text indexes
+                for ft_index in self._fulltext_indexes.values():
+                    ft_index.remove_document(record)
             deleted_count = len(self._data)
             self._data.clear()
         else:
@@ -2619,6 +2956,9 @@ class JSONlite:
                 if self._match_filter(filter, self._data[idx]):
                     # Remove from indexes before deleting
                     self._index_manager.remove_document(self._data[idx])
+                    # Remove from full-text indexes
+                    for ft_index in self._fulltext_indexes.values():
+                        ft_index.remove_document(self._data[idx])
                     del self._data[idx]
                     deleted_count += 1
                     if not delete_all:
