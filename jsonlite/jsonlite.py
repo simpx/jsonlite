@@ -1568,62 +1568,291 @@ class AggregationCursor:
         self._data = result
         return self
     
+    def _get_value(self, val: Any, doc: Dict) -> Any:
+        """Get value from field reference or literal, with recursive expression evaluation."""
+        if isinstance(val, dict):
+            # Recursively evaluate nested expression
+            return self._eval_expr(val, doc)
+        elif isinstance(val, str) and val.startswith('$'):
+            return doc.get(val[1:])
+        return val
+    
     def _eval_expr(self, expr: Dict, doc: Dict) -> Any:
-        """Evaluate an expression against a document."""
+        """Evaluate an expression against a document.
+        
+        Supports MongoDB-compatible aggregation expressions:
+        - Arithmetic: $add, $subtract, $multiply, $divide, $abs, $ceil, $floor, $mod, $pow, $sqrt, $round, $trunc
+        - Comparison: $cmp, $eq, $ne, $gt, $gte, $lt, $lte
+        - Logical: $and, $or, $not
+        - String: $concat, $substr, $tolower, $toupper, $strlen, $split, $trim
+        - Array: $size, $arrayElemAt, $concatArrays, $isArray, $in, $slice
+        - Type: $toBool, $toInt, $toDouble, $toString
+        - Conditional: $cond, $literal
+        """
         for op, val in expr.items():
-            if op == '$concat':
-                parts = []
-                for item in val:
-                    if isinstance(item, str) and item.startswith('$'):
-                        parts.append(str(doc.get(item[1:], '')))
-                    else:
-                        parts.append(str(item))
-                return ''.join(parts)
-            elif op == '$add':
+            # ========== Arithmetic Operators ==========
+            if op == '$add':
                 total = 0
                 for item in val:
-                    if isinstance(item, str) and item.startswith('$'):
-                        total += doc.get(item[1:], 0)
-                    else:
-                        total += item
+                    total += self._get_value(item, doc) if not isinstance(item, (int, float)) else item
                 return total
+            
             elif op == '$subtract':
-                result = val[0]
+                result = self._get_value(val[0], doc) if not isinstance(val[0], (int, float)) else val[0]
                 for item in val[1:]:
-                    if isinstance(item, str) and item.startswith('$'):
-                        result -= doc.get(item[1:], 0)
-                    else:
-                        result -= item
+                    result -= self._get_value(item, doc) if not isinstance(item, (int, float)) else item
                 return result
+            
             elif op == '$multiply':
                 result = 1
                 for item in val:
-                    if isinstance(item, str) and item.startswith('$'):
-                        result *= doc.get(item[1:], 1)
-                    else:
-                        result *= item
+                    result *= self._get_value(item, doc) if not isinstance(item, (int, float)) else item
                 return result
+            
             elif op == '$divide':
                 if len(val) >= 2:
-                    a = doc.get(val[0][1:], 0) if isinstance(val[0], str) and val[0].startswith('$') else val[0]
-                    b = doc.get(val[1][1:], 1) if isinstance(val[1], str) and val[1].startswith('$') else val[1]
+                    a = self._get_value(val[0], doc)
+                    b = self._get_value(val[1], doc)
                     return a / b if b != 0 else None
+            
+            elif op == '$abs':
+                v = self._get_value(val, doc)
+                return abs(v) if isinstance(v, (int, float)) else None
+            
+            elif op == '$ceil':
+                v = self._get_value(val, doc)
+                import math
+                return math.ceil(v) if isinstance(v, (int, float)) else None
+            
+            elif op == '$floor':
+                v = self._get_value(val, doc)
+                import math
+                return math.floor(v) if isinstance(v, (int, float)) else None
+            
+            elif op == '$mod':
+                if len(val) >= 2:
+                    a = self._get_value(val[0], doc)
+                    b = self._get_value(val[1], doc)
+                    return a % b if b != 0 else None
+            
+            elif op == '$pow':
+                if len(val) >= 2:
+                    base = self._get_value(val[0], doc)
+                    exp = self._get_value(val[1], doc)
+                    import math
+                    return math.pow(base, exp) if isinstance(base, (int, float)) and isinstance(exp, (int, float)) else None
+            
+            elif op == '$sqrt':
+                v = self._get_value(val, doc)
+                import math
+                return math.sqrt(v) if isinstance(v, (int, float)) and v >= 0 else None
+            
+            elif op == '$round':
+                if isinstance(val, list) and len(val) >= 1:
+                    v = self._get_value(val[0], doc)
+                    if len(val) >= 2:
+                        places = val[1]
+                        return round(v, places) if isinstance(v, (int, float)) and isinstance(places, int) else None
+                    return round(v) if isinstance(v, (int, float)) else None
+                else:
+                    v = self._get_value(val, doc)
+                    return round(v) if isinstance(v, (int, float)) else None
+            
+            elif op == '$trunc':
+                v = self._get_value(val, doc)
+                return int(v) if isinstance(v, (int, float)) else None
+            
+            # ========== Comparison Operators ==========
+            elif op == '$cmp':
+                if len(val) >= 2:
+                    a = self._get_value(val[0], doc)
+                    b = self._get_value(val[1], doc)
+                    if a is None or b is None:
+                        return None
+                    if a == b:
+                        return 0
+                    return 1 if a > b else -1
+            
+            elif op == '$eq':
+                if len(val) >= 2:
+                    return self._get_value(val[0], doc) == self._get_value(val[1], doc)
+            
+            elif op == '$ne':
+                if len(val) >= 2:
+                    return self._get_value(val[0], doc) != self._get_value(val[1], doc)
+            
+            elif op == '$gt':
+                if len(val) >= 2:
+                    a = self._get_value(val[0], doc)
+                    b = self._get_value(val[1], doc)
+                    return a > b if a is not None and b is not None else False
+            
+            elif op == '$gte':
+                if len(val) >= 2:
+                    a = self._get_value(val[0], doc)
+                    b = self._get_value(val[1], doc)
+                    return a >= b if a is not None and b is not None else False
+            
+            elif op == '$lt':
+                if len(val) >= 2:
+                    a = self._get_value(val[0], doc)
+                    b = self._get_value(val[1], doc)
+                    return a < b if a is not None and b is not None else False
+            
+            elif op == '$lte':
+                if len(val) >= 2:
+                    a = self._get_value(val[0], doc)
+                    b = self._get_value(val[1], doc)
+                    return a <= b if a is not None and b is not None else False
+            
+            # ========== Logical Operators ==========
+            elif op == '$and':
+                if isinstance(val, list):
+                    return all(self._get_value(item, doc) for item in val)
+            
+            elif op == '$or':
+                if isinstance(val, list):
+                    return any(self._get_value(item, doc) for item in val)
+            
+            elif op == '$not':
+                return not self._get_value(val, doc)
+            
+            # ========== String Operators ==========
+            elif op == '$concat':
+                parts = []
+                for item in val:
+                    v = self._get_value(item, doc)
+                    parts.append(str(v) if v is not None else '')
+                return ''.join(parts)
+            
+            elif op == '$substr':
+                # {$substr: [<string>, <start>, <length>]}
+                if isinstance(val, list) and len(val) >= 3:
+                    s = self._get_value(val[0], doc)
+                    start = val[1]
+                    length = val[2]
+                    if isinstance(s, str):
+                        return s[start:start + length]
+            
+            elif op == '$tolower':
+                v = self._get_value(val, doc)
+                return v.lower() if isinstance(v, str) else v
+            
+            elif op == '$toupper':
+                v = self._get_value(val, doc)
+                return v.upper() if isinstance(v, str) else v
+            
+            elif op == '$strlen':
+                v = self._get_value(val, doc)
+                return len(v) if isinstance(v, str) else None
+            
+            elif op == '$split':
+                if isinstance(val, list) and len(val) >= 2:
+                    s = self._get_value(val[0], doc)
+                    delimiter = self._get_value(val[1], doc)
+                    if isinstance(s, str) and isinstance(delimiter, str):
+                        return s.split(delimiter)
+            
+            elif op == '$trim':
+                v = self._get_value(val, doc)
+                return v.strip() if isinstance(v, str) else v
+            
+            # ========== Array Operators ==========
             elif op == '$size':
-                if isinstance(val, str) and val.startswith('$'):
-                    arr = doc.get(val[1:], [])
-                    return len(arr) if isinstance(arr, list) else 0
+                arr = self._get_value(val, doc)
+                return len(arr) if isinstance(arr, list) else 0
+            
+            elif op == '$arrayElemAt':
+                if isinstance(val, list) and len(val) >= 2:
+                    arr = self._get_value(val[0], doc)
+                    idx = val[1]
+                    if isinstance(arr, list) and isinstance(idx, int):
+                        return arr[idx] if -len(arr) <= idx < len(arr) else None
+            
+            elif op == '$concatArrays':
+                result = []
+                for item in val:
+                    arr = self._get_value(item, doc)
+                    if isinstance(arr, list):
+                        result.extend(arr)
+                return result
+            
+            elif op == '$isArray':
+                arr = self._get_value(val, doc)
+                return isinstance(arr, list)
+            
+            elif op == '$in':
+                if isinstance(val, list) and len(val) >= 2:
+                    elem = self._get_value(val[0], doc)
+                    arr = self._get_value(val[1], doc)
+                    if isinstance(arr, list):
+                        return elem in arr
+            
+            elif op == '$slice':
+                if isinstance(val, list) and len(val) >= 2:
+                    arr = self._get_value(val[0], doc)
+                    if isinstance(arr, list):
+                        n = val[1]
+                        if len(val) >= 3:
+                            skip = val[1]
+                            n = val[2]
+                            return arr[skip:skip + n]
+                        if n >= 0:
+                            return arr[:n]
+                        else:
+                            return arr[n:]
+            
+            # ========== Type Conversion Operators ==========
+            elif op == '$toBool':
+                v = self._get_value(val, doc)
+                return bool(v)
+            
+            elif op == '$toInt':
+                v = self._get_value(val, doc)
+                if isinstance(v, (int, float)):
+                    return int(v)
+                elif isinstance(v, str):
+                    try:
+                        return int(v)
+                    except (ValueError, TypeError):
+                        return None
+                return None
+            
+            elif op == '$toDouble':
+                v = self._get_value(val, doc)
+                if isinstance(v, (int, float)):
+                    return float(v)
+                elif isinstance(v, str):
+                    try:
+                        return float(v)
+                    except (ValueError, TypeError):
+                        return None
+                return None
+            
+            elif op == '$toString':
+                v = self._get_value(val, doc)
+                return str(v) if v is not None else None
+            
+            # ========== Conditional Operators ==========
             elif op == '$literal':
                 return val
+            
             elif op == '$cond':
-                # {$cond: {if: ..., then: ..., else: ...}}
+                # {$cond: {if: ..., then: ..., else: ...}} or {$cond: [<bool>, <true>, <false>]}
                 if isinstance(val, dict):
                     condition = val.get('if')
                     then_val = val.get('then')
                     else_val = val.get('else')
+                    # Evaluate then/else if they are field references
                     if isinstance(then_val, str) and then_val.startswith('$'):
                         then_val = doc.get(then_val[1:])
                     if isinstance(else_val, str) and else_val.startswith('$'):
                         else_val = doc.get(else_val[1:])
+                    return then_val if condition else else_val
+                elif isinstance(val, list) and len(val) >= 3:
+                    condition = self._get_value(val[0], doc)
+                    then_val = self._get_value(val[1], doc)
+                    else_val = self._get_value(val[2], doc)
                     return then_val if condition else else_val
         return None
     

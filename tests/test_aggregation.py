@@ -532,5 +532,254 @@ class TestBucketAuto:
             os.remove(test_file)
 
 
+class TestExpressionOperators:
+    """Test aggregation expression operators."""
+    
+    def test_arithmetic_abs(self, db):
+        """Test $abs operator."""
+        # Add a document with negative value
+        db.insert_one({"value": -42, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {"absolute": {"$abs": "$value"}}}
+        ]).all()
+        
+        assert len(result) == 1
+        assert result[0]["absolute"] == 42
+    
+    def test_arithmetic_ceil_floor(self, db):
+        """Test $ceil and $floor operators."""
+        db.insert_one({"value": 3.7, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "ceil": {"$ceil": "$value"},
+                "floor": {"$floor": "$value"}
+            }}
+        ]).all()
+        
+        assert result[0]["ceil"] == 4
+        assert result[0]["floor"] == 3
+    
+    def test_arithmetic_mod_pow_sqrt(self, db):
+        """Test $mod, $pow, $sqrt operators."""
+        db.insert_one({"a": 10, "b": 3, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "mod": {"$mod": ["$a", "$b"]},
+                "pow": {"$pow": [2, 3]},
+                "sqrt": {"$sqrt": 16}
+            }}
+        ]).all()
+        
+        assert result[0]["mod"] == 1  # 10 % 3
+        assert result[0]["pow"] == 8  # 2^3
+        assert result[0]["sqrt"] == 4
+    
+    def test_arithmetic_round_trunc(self, db):
+        """Test $round and $trunc operators."""
+        db.insert_one({"value": 3.14159, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "rounded": {"$round": ["$value", 2]},
+                "truncated": {"$trunc": "$value"}
+            }}
+        ]).all()
+        
+        assert result[0]["rounded"] == 3.14
+        assert result[0]["truncated"] == 3
+    
+    def test_comparison_operators(self, db):
+        """Test comparison operators: $cmp, $eq, $ne, $gt, $gte, $lt, $lte."""
+        db.insert_one({"a": 5, "b": 10, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "cmp": {"$cmp": ["$a", "$b"]},
+                "eq": {"$eq": ["$a", "$b"]},
+                "ne": {"$ne": ["$a", "$b"]},
+                "gt": {"$gt": ["$a", "$b"]},
+                "gte": {"$gte": ["$a", "$b"]},
+                "lt": {"$lt": ["$a", "$b"]},
+                "lte": {"$lte": ["$a", "$b"]}
+            }}
+        ]).all()
+        
+        assert result[0]["cmp"] == -1  # 5 < 10
+        assert result[0]["eq"] == False
+        assert result[0]["ne"] == True
+        assert result[0]["gt"] == False
+        assert result[0]["gte"] == False
+        assert result[0]["lt"] == True
+        assert result[0]["lte"] == True
+    
+    def test_logical_operators(self, db):
+        """Test $and, $or, $not operators."""
+        db.insert_one({"a": True, "b": False, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "and_result": {"$and": ["$a", "$b"]},
+                "or_result": {"$or": ["$a", "$b"]},
+                "not_a": {"$not": "$a"}
+            }}
+        ]).all()
+        
+        assert result[0]["and_result"] == False
+        assert result[0]["or_result"] == True
+        assert result[0]["not_a"] == False
+    
+    def test_string_operators(self, db):
+        """Test string operators: $substr, $tolower, $toupper, $strlen, $split, $trim."""
+        db.insert_one({"text": "  Hello World  ", "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "substr": {"$substr": ["$text", 2, 5]},
+                "lower": {"$tolower": "$text"},
+                "upper": {"$toupper": "$text"},
+                "length": {"$strlen": "$text"},
+                "trimmed": {"$trim": "$text"}
+            }}
+        ]).all()
+        
+        assert result[0]["substr"] == "Hello"  # Starting at index 2: "Hello"
+        assert result[0]["lower"] == "  hello world  "
+        assert result[0]["upper"] == "  HELLO WORLD  "
+        assert result[0]["length"] == 15
+        assert result[0]["trimmed"] == "Hello World"
+    
+    def test_string_split(self, db):
+        """Test $split operator."""
+        db.insert_one({"text": "apple,banana,cherry", "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "parts": {"$split": ["$text", ","]}
+            }}
+        ]).all()
+        
+        assert result[0]["parts"] == ["apple", "banana", "cherry"]
+    
+    def test_array_operators(self, db):
+        """Test array operators: $arrayElemAt, $concatArrays, $isArray, $in, $slice."""
+        db.insert_one({
+            "arr1": [1, 2, 3],
+            "arr2": [4, 5, 6],
+            "value": 3,
+            "name": "test"
+        })
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "elem": {"$arrayElemAt": ["$arr1", 1]},
+                "concat": {"$concatArrays": ["$arr1", "$arr2"]},
+                "is_arr": {"$isArray": "$arr1"},
+                "in_arr": {"$in": ["$value", "$arr1"]},
+                "sliced": {"$slice": ["$arr1", 2]}
+            }}
+        ]).all()
+        
+        assert result[0]["elem"] == 2
+        assert result[0]["concat"] == [1, 2, 3, 4, 5, 6]
+        assert result[0]["is_arr"] == True
+        assert result[0]["in_arr"] == True
+        assert result[0]["sliced"] == [1, 2]
+    
+    def test_array_slice_with_skip(self, db):
+        """Test $slice with skip parameter."""
+        db.insert_one({"arr": [1, 2, 3, 4, 5], "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "sliced": {"$slice": ["$arr", 1, 3]}
+            }}
+        ]).all()
+        
+        assert result[0]["sliced"] == [2, 3, 4]
+    
+    def test_type_conversion(self, db):
+        """Test type conversion operators: $toBool, $toInt, $toDouble, $toString."""
+        db.insert_one({"num": 42, "str": "123", "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "to_bool": {"$toBool": "$num"},
+                "to_int": {"$toInt": "$str"},
+                "to_double": {"$toDouble": "$num"},
+                "to_string": {"$toString": "$num"}
+            }}
+        ]).all()
+        
+        assert result[0]["to_bool"] == True
+        assert result[0]["to_int"] == 123
+        assert result[0]["to_double"] == 42.0
+        assert result[0]["to_string"] == "42"
+    
+    def test_cond_array_form(self, db):
+        """Test $cond in array form."""
+        db.insert_one({"value": 10, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "result": {"$cond": [{"$gt": ["$value", 5]}, "big", "small"]}
+            }}
+        ]).all()
+        
+        assert result[0]["result"] == "big"
+    
+    def test_complex_expression(self, db):
+        """Test complex nested expression."""
+        db.insert_one({"price": 100, "discount": 0.2, "name": "test"})
+        
+        result = db.aggregate([
+            {"$match": {"name": "test"}},
+            {"$project": {
+                "final_price": {
+                    "$multiply": [
+                        "$price",
+                        {"$subtract": [1, "$discount"]}
+                    ]
+                }
+            }}
+        ]).all()
+        
+        assert result[0]["final_price"] == 80.0
+    
+    def test_conditional_with_comparison(self, db):
+        """Test conditional logic with comparison operators."""
+        db.insert_many([
+            {"score": 85, "name": "Alice"},
+            {"score": 59, "name": "Bob"},
+            {"score": 72, "name": "Charlie"}
+        ])
+        
+        result = db.aggregate([
+            {"$project": {
+                "name": 1,
+                "passed": {"$cond": [{"$gte": ["$score", 60]}, "Yes", "No"]}
+            }}
+        ]).all()
+        
+        passed = {r["name"]: r["passed"] for r in result}
+        assert passed["Alice"] == "Yes"
+        assert passed["Bob"] == "No"
+        assert passed["Charlie"] == "Yes"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
