@@ -338,3 +338,33 @@
 - 网络模式 (JSONLiteServer + RemoteMongoClient) ✅
 - 数据压缩 (Gzip, 压缩级别 1-9) ✅
 - 数据加密 (AES-256-GCM + PBKDF2-SHA256) ✅
+
+---
+
+## 🚀 v1.2 开发中 (2026-03-28 ~ )
+
+**当前重点**: 聚合管道增强 - $lookup 左外连接
+
+#### 已完成 (v1.2-alpha)
+- [x] **$lookup 聚合阶段** ✅ (2026-03-28)
+  - 基础语法：from, localField, foreignField, as ✅
+  - 管道语法：let 变量 + pipeline 阶段 ✅
+  - 跨集合连接（同数据库内）✅
+  - MongoClient/Database 集成支持 ✅
+  - 独立 JSONlite 支持（兄弟 .json 文件连接）✅
+  - 与所有聚合阶段兼容 ($match, $unwind, $project 等) ✅
+  - 10 个综合测试全部通过 ✅
+  - 总测试数：379 tests passing ✅
+
+#### v1.2 候选功能
+- [ ] $graphLookup (递归连接)
+- [ ] $facet (多面聚合)
+- [ ] $bucket / $bucketAuto (分桶聚合)
+- [ ] 更多聚合表达式操作符
+- [ ] 查询计划器/优化器
+- [ ] 虚拟字段/计算字段
+
+---
+
+**创建时间**: 2026-03-20  
+**最后更新**: 2026-03-28 (v1.2.0-alpha $lookup 完成)

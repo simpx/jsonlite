@@ -5,6 +5,24 @@ All notable changes to JSONLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0-alpha] - 2026-03-28
+
+### Added
+- **$lookup Aggregation Stage** - Left outer join with another collection
+  - Basic syntax with `from`, `localField`, `foreignField`, `as`
+  - Pipeline syntax with `let` variables and `pipeline` stages
+  - Cross-collection joins within same database
+  - MongoClient/Database integration for multi-database support
+  - Standalone JSONlite support for sibling .json file joins
+  - Compatible with all aggregation stages ($match, $unwind, $project, etc.)
+  - 10 comprehensive tests covering basic joins, no-match, multiple matches, and pipeline syntax
+
+### Changed
+- Test suite expanded from 369 to 379 tests (+10 tests)
+- AggregationCursor extended with `_get_foreign_collection()` helper
+
+---
+
 ## [1.1.1] - 2026-03-27
 
 ### Changed
