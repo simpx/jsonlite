@@ -112,6 +112,127 @@ def _is_compressed(data: bytes) -> bool:
 
 
 # =============================================================================
+# Encryption Helper Functions
+# =============================================================================
+
+# Encryption magic number for detecting encrypted files
+# Format: ENCR (4 bytes) + version (1 byte) + nonce (12 bytes) + ciphertext + tag (16 bytes)
+_ENCRYPTION_MAGIC = b'ENCR'
+_ENCRYPTION_VERSION = b'\x01'
+
+# AES-GCM nonce size (96 bits / 12 bytes)
+_AES_GCM_NONCE_SIZE = 12
+
+
+def _derive_key(password: str, salt: bytes, key_length: int = 32) -> bytes:
+    """Derive encryption key from password using PBKDF2-SHA256.
+    
+    Args:
+        password: User password string
+        salt: Random salt bytes (should be 16+ bytes)
+        key_length: Desired key length in bytes (default 32 for AES-256)
+    
+    Returns:
+        Derived key bytes
+    """
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    import base64
+    
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=key_length,
+        salt=salt,
+        iterations=100000,
+    )
+    return kdf.derive(password.encode('utf-8'))
+
+
+def _encrypt_data(data: bytes, password: str) -> bytes:
+    """Encrypt data using AES-256-GCM.
+    
+    Format: ENCR (magic) + version + salt (16 bytes) + nonce (12 bytes) + ciphertext + tag (16 bytes)
+    
+    Args:
+        data: Raw bytes to encrypt
+        password: Encryption password
+    
+    Returns:
+        Encrypted bytes with header
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    import os
+    
+    # Generate random salt and nonce
+    salt = os.urandom(16)
+    nonce = os.urandom(_AES_GCM_NONCE_SIZE)
+    
+    # Derive key from password
+    key = _derive_key(password, salt)
+    
+    # Encrypt using AES-GCM (authenticated encryption)
+    aesgcm = AESGCM(key)
+    ciphertext = aesgcm.encrypt(nonce, data, None)
+    
+    # Build encrypted file format: magic + version + salt + nonce + ciphertext
+    # (tag is appended to ciphertext by AESGCM)
+    return _ENCRYPTION_MAGIC + _ENCRYPTION_VERSION + salt + nonce + ciphertext
+
+
+def _decrypt_data(data: bytes, password: str) -> bytes:
+    """Decrypt AES-256-GCM encrypted data.
+    
+    Args:
+        data: Encrypted bytes (including header)
+        password: Decryption password
+    
+    Returns:
+        Decrypted bytes
+    
+    Raises:
+        ValueError: If decryption fails (wrong password or corrupted data)
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    
+    # Parse header
+    if not data.startswith(_ENCRYPTION_MAGIC):
+        raise ValueError("Invalid encryption magic number")
+    
+    version = data[4:5]
+    if version != _ENCRYPTION_VERSION:
+        raise ValueError(f"Unsupported encryption version: {version}")
+    
+    # Extract components
+    salt = data[5:21]  # 16 bytes
+    nonce = data[21:33]  # 12 bytes
+    ciphertext_with_tag = data[33:]  # ciphertext + 16-byte tag
+    
+    # Derive key from password
+    key = _derive_key(password, salt)
+    
+    # Decrypt
+    aesgcm = AESGCM(key)
+    try:
+        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+    except Exception as e:
+        raise ValueError(f"Decryption failed: {e}")
+    
+    return plaintext
+
+
+def _is_encrypted(data: bytes) -> bool:
+    """Check if data appears to be encrypted.
+    
+    Args:
+        data: Bytes to check
+    
+    Returns:
+        True if data starts with encryption magic number
+    """
+    return data.startswith(_ENCRYPTION_MAGIC)
+
+
+# =============================================================================
 # Geospatial Helper Functions
 # =============================================================================
 
@@ -2173,7 +2294,8 @@ def _deep_equals(a: Any, b: Any) -> bool:
 
 class JSONlite:
     def __init__(self, filename: str, cache_enabled: bool = True, cache_size: int = 100,
-                 compression_enabled: bool = False, compression_level: int = 6):
+                 compression_enabled: bool = False, compression_level: int = 6,
+                 encryption_enabled: bool = False, encryption_password: Optional[str] = None):
         """Initialize JSONlite database.
         
         Args:
@@ -2183,12 +2305,19 @@ class JSONlite:
             compression_enabled: Enable gzip compression for data storage (default: False)
             compression_level: Gzip compression level 1-9 (default: 6)
                               1 = fastest, 9 = best compression
+            encryption_enabled: Enable AES-256-GCM encryption for data storage (default: False)
+            encryption_password: Password for encryption/decryption (required if encryption_enabled=True)
         """
         self._filename = filename
         self._cache_enabled = cache_enabled
         self._cache = QueryCache(max_size=cache_size) if cache_enabled else None
         self._compression_enabled = compression_enabled
         self._compression_level = compression_level
+        self._encryption_enabled = encryption_enabled
+        self._encryption_password = encryption_password
+        
+        if encryption_enabled and not encryption_password:
+            raise ValueError("encryption_password is required when encryption_enabled=True")
         self.operators = {
             '$gt': lambda v, c: v is not None and v > c,
             '$lt': lambda v, c: v is not None and v < c,
@@ -2242,8 +2371,20 @@ class JSONlite:
         if not content_bytes:
             self._database = {"data": [], "_indexes": []}
         else:
+            # Detect if content is encrypted (encryption magic number)
+            if _is_encrypted(content_bytes):
+                if not self._encryption_password:
+                    raise ValueError("File is encrypted but no encryption_password provided")
+                # Decrypt data
+                decrypted = _decrypt_data(content_bytes, self._encryption_password)
+                # Check if decrypted data is compressed
+                if _is_compressed(decrypted):
+                    decompressed = _decompress_data(decrypted)
+                    content = decompressed.decode('utf-8')
+                else:
+                    content = decrypted.decode('utf-8')
             # Detect if content is compressed (gzip magic number)
-            if _is_compressed(content_bytes):
+            elif _is_compressed(content_bytes):
                 # Decompress gzip data
                 decompressed = _decompress_data(content_bytes)
                 content = decompressed.decode('utf-8')
@@ -2265,15 +2406,18 @@ class JSONlite:
         
         # Serialize to JSON string first
         json_str = json.dumps(self._database, ensure_ascii=False, indent=4, default=self._default_serializer)
+        json_bytes = json_str.encode('utf-8')
         
+        # Apply compression if enabled
         if self._compression_enabled:
-            # Compress and write binary
-            json_bytes = json_str.encode('utf-8')
-            compressed = _compress_data(json_bytes, self._compression_level)
-            file.write(compressed)
-        else:
-            # Write uncompressed JSON (encode to bytes for binary file)
-            file.write(json_str.encode('utf-8'))
+            json_bytes = _compress_data(json_bytes, self._compression_level)
+        
+        # Apply encryption if enabled (encrypts the compressed or uncompressed data)
+        if self._encryption_enabled:
+            json_bytes = _encrypt_data(json_bytes, self._encryption_password)
+        
+        # Write binary data
+        file.write(json_bytes)
         
         file.flush()
         os.fsync(file.fileno())
@@ -3234,7 +3378,7 @@ class JSONlite:
     
     def _save(self) -> None:
         """Save the database to disk."""
-        with open(self._filename, 'w', encoding='utf-8') as file:
+        with open(self._filename, 'wb') as file:
             self._save_database(file)
     
     @contextmanager

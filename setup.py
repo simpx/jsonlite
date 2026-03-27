@@ -27,6 +27,7 @@ setup(
     install_requires=[],
     extras_require={
         'performance': ['orjson>=3.0.0'],
+        'security': ['cryptography>=3.0.0'],
         'dev': ['pytest>=6.0.0', 'pytest-cov>=2.0.0', 'setuptools_scm'],
     },
     python_requires='>=3.6',
