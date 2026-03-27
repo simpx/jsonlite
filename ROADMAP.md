@@ -317,4 +317,24 @@
 ---
 
 **创建时间**: 2026-03-20  
-**最后更新**: 2026-03-27 (v1.1 地理空间查询功能完成)
+**最后更新**: 2026-03-27 (v1.1.1 发布完成)
+
+---
+
+## 🎉 v1.1.1 发布完成 (2026-03-27)
+
+**发布日期**: 2026-03-27  
+**PyPI 包名**: jsonlite  
+**版本**: 1.1.1  
+**测试**: 369 tests passing ✅  
+**GitHub Release**: https://github.com/simpx/jsonlite/releases/tag/v1.1.1  
+**PyPI**: https://pypi.org/project/jsonlite/1.1.1/  
+**安装**: `pip install --upgrade jsonlite`
+
+**v1.1 系列核心功能**:
+- 地理空间查询 ($near, $geoWithin, $geoIntersects) + Geohash 索引 ✅
+- 全文搜索索引 (倒排索引 + TF-IDF 评分) ✅
+- 多数据库/集合管理 (MongoClient/Database/Collection) ✅
+- 网络模式 (JSONLiteServer + RemoteMongoClient) ✅
+- 数据压缩 (Gzip, 压缩级别 1-9) ✅
+- 数据加密 (AES-256-GCM + PBKDF2-SHA256) ✅

@@ -5,6 +5,17 @@ All notable changes to JSONLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-03-27
+
+### Changed
+- Updated documentation with v1.1.0 release notes in CHANGELOG
+- Finalized v1.1 release polish
+
+### Notes
+- Version bump from 1.1.0 to 1.1.1 to include documentation updates in released package
+
+---
+
 ## [1.1.0] - 2026-03-27
 
 ### Added
