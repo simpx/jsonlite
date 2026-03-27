@@ -268,5 +268,269 @@ class TestComplexPipeline:
         assert result[0]["city"] == "NYC"  # NYC has highest total salary
 
 
+class TestBucket:
+    """Test $bucket stage."""
+    
+    def test_bucket_basic(self):
+        """Test basic bucket grouping by price ranges."""
+        test_file = '/tmp/test_bucket_basic.json'
+        if os.path.exists(test_file):
+            os.remove(test_file)
+        
+        db = JSONlite(test_file)
+        
+        # Insert products with different prices
+        db.insert_many([
+            {"name": "Product A", "price": 50},
+            {"name": "Product B", "price": 150},
+            {"name": "Product C", "price": 250},
+            {"name": "Product D", "price": 350},
+            {"name": "Product E", "price": 450},
+            {"name": "Product F", "price": 550},
+        ])
+        
+        result = db.aggregate([
+            {
+                "$bucket": {
+                    "groupBy": "$price",
+                    "boundaries": [0, 100, 200, 300, 400, 500, 600],
+                    "output": {
+                        "count": {"$count": {}},
+                        "avgPrice": {"$avg": "$price"}
+                    }
+                }
+            }
+        ]).all()
+        
+        # Should have 6 buckets (0-100, 100-200, 200-300, 300-400, 400-500, 500-600)
+        assert len(result) == 6
+        
+        # Check first bucket (0-100)
+        bucket_0 = next(b for b in result if b['_id'] == 0)
+        assert bucket_0['count'] == 1
+        assert bucket_0['avgPrice'] == 50
+        
+        # Check bucket 100-200
+        bucket_100 = next(b for b in result if b['_id'] == 100)
+        assert bucket_100['count'] == 1
+        assert bucket_100['avgPrice'] == 150
+        
+        # Cleanup
+        if os.path.exists(test_file):
+            os.remove(test_file)
+    
+    def test_bucket_with_default(self):
+        """Test bucket with default label for out-of-range values."""
+        test_file = '/tmp/test_bucket_default.json'
+        if os.path.exists(test_file):
+            os.remove(test_file)
+        
+        db = JSONlite(test_file)
+        
+        db.insert_many([
+            {"name": "Product A", "price": 50},
+            {"name": "Product B", "price": 150},
+            {"name": "Product C", "price": 999},  # Out of range
+        ])
+        
+        result = db.aggregate([
+            {
+                "$bucket": {
+                    "groupBy": "$price",
+                    "boundaries": [0, 100, 200],
+                    "default": "Other",
+                    "output": {
+                        "count": {"$count": {}},
+                        "products": {"$push": "$name"}
+                    }
+                }
+            }
+        ]).all()
+        
+        # Should have 3 buckets: 0-100, 100-200, and Other
+        assert len(result) == 3
+        
+        # Check default bucket
+        other = next(b for b in result if b['_id'] == 'Other')
+        assert other['count'] == 1
+        assert other['products'] == ['Product C']
+        
+        # Cleanup
+        if os.path.exists(test_file):
+            os.remove(test_file)
+    
+    def test_bucket_with_sum_and_avg(self):
+        """Test bucket with multiple accumulators."""
+        test_file = '/tmp/test_bucket_sum_avg.json'
+        if os.path.exists(test_file):
+            os.remove(test_file)
+        
+        db = JSONlite(test_file)
+        
+        db.insert_many([
+            {"name": "A", "age": 20, "score": 80},
+            {"name": "B", "age": 25, "score": 85},
+            {"name": "C", "age": 30, "score": 90},
+            {"name": "D", "age": 35, "score": 95},
+            {"name": "E", "age": 40, "score": 100},
+        ])
+        
+        result = db.aggregate([
+            {
+                "$bucket": {
+                    "groupBy": "$age",
+                    "boundaries": [0, 25, 50],
+                    "output": {
+                        "count": {"$count": {}},
+                        "totalScore": {"$sum": "$score"},
+                        "avgScore": {"$avg": "$score"},
+                        "minScore": {"$min": "$score"},
+                        "maxScore": {"$max": "$score"}
+                    }
+                }
+            }
+        ]).all()
+        
+        assert len(result) == 2
+        
+        # Bucket 0-25: A (20, 80), B (25, 85) - note: 25 is in 25-50 bucket
+        bucket_0 = next(b for b in result if b['_id'] == 0)
+        assert bucket_0['count'] == 1  # Only A (age 20)
+        assert bucket_0['totalScore'] == 80
+        assert bucket_0['avgScore'] == 80
+        
+        # Bucket 25-50: B (25), C (30), D (35), E (40)
+        bucket_25 = next(b for b in result if b['_id'] == 25)
+        assert bucket_25['count'] == 4
+        assert bucket_25['totalScore'] == 85 + 90 + 95 + 100  # 370
+        assert bucket_25['avgScore'] == 370 / 4  # 92.5
+        assert bucket_25['minScore'] == 85
+        assert bucket_25['maxScore'] == 100
+        
+        # Cleanup
+        if os.path.exists(test_file):
+            os.remove(test_file)
+
+
+class TestBucketAuto:
+    """Test $bucketAuto stage."""
+    
+    def test_bucket_auto_basic(self):
+        """Test automatic bucket creation."""
+        test_file = '/tmp/test_bucket_auto_basic.json'
+        if os.path.exists(test_file):
+            os.remove(test_file)
+        
+        db = JSONlite(test_file)
+        
+        db.insert_many([
+            {"name": "A", "value": 10},
+            {"name": "B", "value": 20},
+            {"name": "C", "value": 30},
+            {"name": "D", "value": 40},
+            {"name": "E", "value": 50},
+            {"name": "F", "value": 60},
+        ])
+        
+        result = db.aggregate([
+            {
+                "$bucketAuto": {
+                    "groupBy": "$value",
+                    "buckets": 3,
+                    "output": {
+                        "count": {"$count": {}},
+                        "avgValue": {"$avg": "$value"}
+                    }
+                }
+            }
+        ]).all()
+        
+        # Should have approximately 3 buckets
+        assert len(result) <= 4  # May have slight variation due to boundary calculation
+        
+        # Total count should be 6
+        total_count = sum(b['count'] for b in result)
+        assert total_count == 6
+        
+        # Each bucket should have _id with min and max
+        for bucket in result:
+            assert '_id' in bucket
+            assert 'min' in bucket['_id']
+            assert 'max' in bucket['_id']
+        
+        # Cleanup
+        if os.path.exists(test_file):
+            os.remove(test_file)
+    
+    def test_bucket_auto_with_first_last(self):
+        """Test bucketAuto with $first and $last accumulators."""
+        test_file = '/tmp/test_bucket_auto_first_last.json'
+        if os.path.exists(test_file):
+            os.remove(test_file)
+        
+        db = JSONlite(test_file)
+        
+        db.insert_many([
+            {"name": "A", "value": 10, "category": "X"},
+            {"name": "B", "value": 20, "category": "Y"},
+            {"name": "C", "value": 30, "category": "Z"},
+        ])
+        
+        result = db.aggregate([
+            {
+                "$bucketAuto": {
+                    "groupBy": "$value",
+                    "buckets": 2,
+                    "output": {
+                        "count": {"$count": {}},
+                        "firstName": {"$first": "$name"},
+                        "lastName": {"$last": "$name"},
+                        "firstCategory": {"$first": "$category"}
+                    }
+                }
+            }
+        ]).all()
+        
+        assert len(result) >= 1
+        
+        # Check that first/last are captured
+        for bucket in result:
+            if bucket['count'] > 0:
+                assert 'firstName' in bucket
+                assert 'lastName' in bucket
+        
+        # Cleanup
+        if os.path.exists(test_file):
+            os.remove(test_file)
+    
+    def test_bucket_auto_empty_result(self, db):
+        """Test bucketAuto with no matching documents."""
+        # Clear existing data by creating new db
+        test_file = '/tmp/test_bucket_auto_empty.json'
+        if os.path.exists(test_file):
+            os.remove(test_file)
+        
+        empty_db = JSONlite(test_file)
+        # Don't insert any data
+        
+        result = empty_db.aggregate([
+            {
+                "$bucketAuto": {
+                    "groupBy": "$value",
+                    "buckets": 5,
+                    "output": {
+                        "count": {"$count": {}}
+                    }
+                }
+            }
+        ]).all()
+        
+        assert result == []
+        
+        # Cleanup
+        if os.path.exists(test_file):
+            os.remove(test_file)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

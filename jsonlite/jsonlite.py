@@ -1210,6 +1210,364 @@ class AggregationCursor:
         self._data = new_data
         return self
     
+    def _bucket(self, bucket_spec: Dict) -> 'AggregationCursor':
+        """$bucket stage: group documents into buckets determined by boundaries.
+        
+        MongoDB syntax:
+        {
+            $bucket: {
+                groupBy: <expression>,
+                boundaries: [<lowerbound1>, <lowerbound2>, ...],
+                default: <literal>,  // optional, for documents outside boundaries
+                output: {
+                    <outputField1>: { <accumulator1>: <expression1> },
+                    ...
+                }
+            }
+        }
+        
+        Args:
+            bucket_spec: Bucket specification dictionary
+            
+        Example:
+            db.products.aggregate([
+                {
+                    $bucket: {
+                        groupBy: "$price",
+                        boundaries: [0, 200, 400, 600, 800, 1000],
+                        default: "Other",
+                        output: {
+                            "count": {"$count": {}},
+                            "avgPrice": {"$avg": "$price"}
+                        }
+                    }
+                }
+            ])
+        """
+        group_by = bucket_spec.get('groupBy')
+        boundaries = bucket_spec.get('boundaries', [])
+        default_label = bucket_spec.get('default')
+        output_spec = bucket_spec.get('output', {})
+        
+        # Extract field name from groupBy expression (e.g., "$price" -> "price")
+        if isinstance(group_by, str) and group_by.startswith('$'):
+            group_field = group_by[1:]
+        else:
+            group_field = None
+        
+        # Sort boundaries to ensure they're in order
+        sorted_boundaries = sorted(boundaries)
+        
+        # Initialize buckets
+        # Each bucket is identified by its lower boundary
+        buckets = {}
+        for i in range(len(sorted_boundaries) - 1):
+            lower = sorted_boundaries[i]
+            upper = sorted_boundaries[i + 1]
+            bucket_key = lower  # Use lower bound as bucket identifier
+            buckets[bucket_key] = []
+        
+        # Add default bucket if specified
+        if default_label is not None:
+            buckets[default_label] = []
+        
+        # Group documents into buckets
+        for doc in self._data:
+            if group_field:
+                value = doc.get(group_field)
+            else:
+                # Evaluate expression if not a simple field reference
+                value = self._eval_expr(group_by, doc) if isinstance(group_by, dict) else None
+            
+            # Find the appropriate bucket
+            placed = False
+            if value is not None:
+                for i in range(len(sorted_boundaries) - 1):
+                    lower = sorted_boundaries[i]
+                    upper = sorted_boundaries[i + 1]
+                    if lower <= value < upper:
+                        buckets[lower].append(doc)
+                        placed = True
+                        break
+            
+            # If not placed in any bucket, use default
+            if not placed and default_label is not None:
+                buckets[default_label].append(doc)
+        
+        # Build result documents
+        result = []
+        for bucket_key, docs in buckets.items():
+            if not docs and bucket_key != default_label:
+                # Skip empty buckets (except we might want to include them with count=0)
+                # MongoDB behavior: empty buckets are not included in output
+                continue
+            
+            bucket_doc = {'_id': bucket_key}
+            
+            # Process output accumulators
+            for field, expr in output_spec.items():
+                if isinstance(expr, dict):
+                    for op, val in expr.items():
+                        if op == '$sum':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                bucket_doc[field] = sum(
+                                    d.get(field_val, 0) for d in docs 
+                                    if isinstance(d.get(field_val), (int, float))
+                                )
+                            else:
+                                bucket_doc[field] = sum(val for _ in docs)
+                        elif op == '$avg':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                vals = [d.get(field_val) for d in docs if isinstance(d.get(field_val), (int, float))]
+                                bucket_doc[field] = sum(vals) / len(vals) if vals else 0
+                            else:
+                                bucket_doc[field] = 0
+                        elif op == '$count':
+                            bucket_doc[field] = len(docs)
+                        elif op == '$min':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                vals = [d.get(field_val) for d in docs if d.get(field_val) is not None]
+                                bucket_doc[field] = min(vals) if vals else None
+                        elif op == '$max':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                vals = [d.get(field_val) for d in docs if d.get(field_val) is not None]
+                                bucket_doc[field] = max(vals) if vals else None
+                        elif op == '$first':
+                            if docs:
+                                if isinstance(val, str) and val.startswith('$'):
+                                    bucket_doc[field] = docs[0].get(val[1:])
+                                else:
+                                    bucket_doc[field] = val
+                        elif op == '$last':
+                            if docs:
+                                if isinstance(val, str) and val.startswith('$'):
+                                    bucket_doc[field] = docs[-1].get(val[1:])
+                                else:
+                                    bucket_doc[field] = val
+                        elif op == '$push':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                bucket_doc[field] = [d.get(field_val) for d in docs]
+                            else:
+                                bucket_doc[field] = [val] * len(docs)
+            
+            result.append(bucket_doc)
+        
+        # Sort results by bucket key
+        def sort_key(doc):
+            key = doc['_id']
+            if isinstance(key, (int, float)):
+                return (0, key)
+            return (1, str(key))
+        
+        result.sort(key=sort_key)
+        self._data = result
+        return self
+    
+    def _bucket_auto(self, bucket_spec: Dict) -> 'AggregationCursor':
+        """$bucketAuto stage: automatically group documents into a specified number of buckets.
+        
+        MongoDB syntax:
+        {
+            $bucketAuto: {
+                groupBy: <expression>,
+                buckets: <number>,
+                output: {
+                    <outputField1>: { <accumulator1>: <expression1> },
+                    ...
+                },
+                granularity: <string>  // optional, preferred number series
+            }
+        }
+        
+        Args:
+            bucket_spec: Bucket specification dictionary
+            
+        Example:
+            db.products.aggregate([
+                {
+                    $bucketAuto: {
+                        groupBy: "$price",
+                        buckets: 5,
+                        output: {
+                            "count": {"$count": {}},
+                            "avgPrice": {"$avg": "$price"}
+                        }
+                    }
+                }
+            ])
+        """
+        group_by = bucket_spec.get('groupBy')
+        num_buckets = bucket_spec.get('buckets', 10)
+        output_spec = bucket_spec.get('output', {})
+        granularity = bucket_spec.get('granularity')
+        
+        # Extract field name from groupBy expression
+        if isinstance(group_by, str) and group_by.startswith('$'):
+            group_field = group_by[1:]
+        else:
+            group_field = None
+        
+        # Collect all values for the grouping field
+        values = []
+        for doc in self._data:
+            if group_field:
+                value = doc.get(group_field)
+            else:
+                value = self._eval_expr(group_by, doc) if isinstance(group_by, dict) else None
+            
+            if value is not None and isinstance(value, (int, float)):
+                values.append((value, doc))
+        
+        if not values:
+            self._data = []
+            return self
+        
+        # Sort by value
+        values.sort(key=lambda x: x[0])
+        sorted_values = [v[0] for v in values]
+        sorted_docs = [v[1] for v in values]
+        
+        min_val = sorted_values[0]
+        max_val = sorted_values[-1]
+        
+        # Calculate bucket boundaries
+        if min_val == max_val:
+            # All values are the same, create one bucket
+            boundaries = [min_val, max_val + 1]
+        else:
+            # Calculate step size
+            step = (max_val - min_val) / num_buckets
+            
+            # Apply granularity if specified
+            if granularity:
+                # Common granularity series: 1, 2, 5, 10, 20, 50, 100, ...
+                granularity_map = {
+                    'R5': [1, 2, 5],
+                    'R10': [1],
+                    'R20': [1, 2, 4, 5],
+                    'R40': [1, 2, 2.5, 4, 5],
+                    'R80': [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8],
+                    'R128': [1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8],
+                    'R256': [1, 1.12, 1.25, 1.4, 1.6, 1.8, 2, 2.24, 2.5, 2.8, 3.15, 3.55, 4, 4.5, 5, 5.6, 6.3, 7.1, 8, 9],
+                }
+                series = granularity_map.get(granularity, [1])
+                # Round step to nearest granularity
+                magnitude = 10 ** int(math.log10(step)) if step > 0 else 1
+                normalized_step = step / magnitude
+                closest = min(series, key=lambda x: abs(x - normalized_step))
+                step = closest * magnitude
+            
+            boundaries = [min_val + i * step for i in range(num_buckets + 1)]
+            # Ensure the last boundary includes max_val
+            boundaries[-1] = max_val + (max_val - min_val) * 0.001  # Small epsilon to include max
+        
+        # Initialize buckets
+        buckets = {}
+        for i in range(len(boundaries) - 1):
+            lower = boundaries[i]
+            upper = boundaries[i + 1]
+            bucket_key = f"{lower}-{upper}" if i < len(boundaries) - 1 else f"{lower}+"
+            buckets[bucket_key] = []
+        
+        # Group documents into buckets
+        for value, doc in zip(sorted_values, sorted_docs):
+            placed = False
+            for i in range(len(boundaries) - 1):
+                lower = boundaries[i]
+                upper = boundaries[i + 1]
+                if lower <= value <= upper:
+                    bucket_key = list(buckets.keys())[i]
+                    buckets[bucket_key].append(doc)
+                    placed = True
+                    break
+            
+            if not placed:
+                # Put in last bucket
+                last_key = list(buckets.keys())[-1]
+                buckets[last_key].append(doc)
+        
+        # Build result documents
+        result = []
+        for bucket_key, docs in buckets.items():
+            if not docs:
+                continue
+            
+            # Parse bucket key to get min/max
+            if '-' in bucket_key:
+                parts = bucket_key.split('-')
+                bucket_min = float(parts[0])
+                bucket_max = float(parts[1])
+            else:
+                bucket_min = float(bucket_key.rstrip('+'))
+                bucket_max = None
+            
+            bucket_doc = {
+                '_id': {
+                    'min': bucket_min,
+                    'max': bucket_max if bucket_max is not None else sorted_values[-1]
+                },
+                'count': len(docs)
+            }
+            
+            # Process output accumulators
+            for field, expr in output_spec.items():
+                if isinstance(expr, dict):
+                    for op, val in expr.items():
+                        if op == '$sum':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                bucket_doc[field] = sum(
+                                    d.get(field_val, 0) for d in docs 
+                                    if isinstance(d.get(field_val), (int, float))
+                                )
+                            else:
+                                bucket_doc[field] = sum(val for _ in docs)
+                        elif op == '$avg':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                vals = [d.get(field_val) for d in docs if isinstance(d.get(field_val), (int, float))]
+                                bucket_doc[field] = sum(vals) / len(vals) if vals else 0
+                        elif op == '$count':
+                            bucket_doc[field] = len(docs)
+                        elif op == '$min':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                vals = [d.get(field_val) for d in docs if d.get(field_val) is not None]
+                                bucket_doc[field] = min(vals) if vals else None
+                        elif op == '$max':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                vals = [d.get(field_val) for d in docs if d.get(field_val) is not None]
+                                bucket_doc[field] = max(vals) if vals else None
+                        elif op == '$first':
+                            if docs:
+                                if isinstance(val, str) and val.startswith('$'):
+                                    bucket_doc[field] = docs[0].get(val[1:])
+                                else:
+                                    bucket_doc[field] = val
+                        elif op == '$last':
+                            if docs:
+                                if isinstance(val, str) and val.startswith('$'):
+                                    bucket_doc[field] = docs[-1].get(val[1:])
+                                else:
+                                    bucket_doc[field] = val
+                        elif op == '$push':
+                            if isinstance(val, str) and val.startswith('$'):
+                                field_val = val[1:]
+                                bucket_doc[field] = [d.get(field_val) for d in docs]
+                            else:
+                                bucket_doc[field] = [val] * len(docs)
+            
+            result.append(bucket_doc)
+        
+        self._data = result
+        return self
+    
     def _eval_expr(self, expr: Dict, doc: Dict) -> Any:
         """Evaluate an expression against a document."""
         for op, val in expr.items():
@@ -1848,6 +2206,10 @@ class AggregationCursor:
                     self._graph_lookup(spec)
                 elif op == '$facet':
                     self._facet(spec)
+                elif op == '$bucket':
+                    self._bucket(spec)
+                elif op == '$bucketAuto':
+                    self._bucket_auto(spec)
         return self
     
     def all(self) -> List[Dict]:

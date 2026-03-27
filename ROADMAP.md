@@ -374,7 +374,11 @@
 
 #### v1.2 候选功能
 - [x] $facet (多面聚合) ✅
-- [ ] $bucket / $bucketAuto (分桶聚合)
+- [x] $bucket / $bucketAuto (分桶聚合) ✅ (2026-03-28)
+  - $bucket: 基于边界分组 ✅
+  - $bucketAuto: 自动分桶 ✅
+  - 支持所有累加器 ($sum, $avg, $count, $min, $max, $first, $last, $push) ✅
+  - 6 个新增测试全部通过 ✅
 - [ ] 更多聚合表达式操作符
 - [ ] 查询计划器/优化器
 - [ ] 虚拟字段/计算字段
@@ -382,4 +386,4 @@
 ---
 
 **创建时间**: 2026-03-20  
-**最后更新**: 2026-03-28 (v1.2.0-alpha $facet 完成，400 tests passing)
+**最后更新**: 2026-03-28 (v1.2.0-alpha $bucket/$bucketAuto 完成，406 tests passing)
