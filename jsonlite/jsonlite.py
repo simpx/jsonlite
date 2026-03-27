@@ -1544,6 +1544,152 @@ class AggregationCursor:
         
         return result
     
+    def _graph_lookup(self, graph_spec: Dict) -> 'AggregationCursor':
+        """$graphLookup stage: perform recursive join with another collection.
+        
+        MongoDB-compatible recursive join that traverses relationships.
+        
+        Syntax:
+        {
+            $graphLookup: {
+                from: <collection>,
+                startWith: <expression>,
+                connectFromField: <field>,
+                connectToField: <field>,
+                as: <output_array_field>,
+                maxDepth: <optional_number>,
+                depthField: <optional_field_name>,
+                restrictSearchWithMatch: <optional_query>
+            }
+        }
+        
+        Args:
+            from: Target collection to search
+            startWith: Starting value(s) for the traversal (can be expression)
+            connectFromField: Field in foreign docs to use for next level
+            connectToField: Field in foreign docs to match against
+            as: Output array field name for results
+            maxDepth: Maximum depth to traverse (0 = no recursion beyond start)
+            depthField: Field name to store depth value in each result doc
+            restrictSearchWithMatch: Query to filter foreign docs during traversal
+        """
+        from_collection = graph_spec.get('from')
+        start_with = graph_spec.get('startWith')
+        connect_from_field = graph_spec.get('connectFromField')
+        connect_to_field = graph_spec.get('connectToField')
+        output_field = graph_spec.get('as', 'graph_lookup')
+        max_depth = graph_spec.get('maxDepth')
+        depth_field = graph_spec.get('depthField')
+        restrict_match = graph_spec.get('restrictSearchWithMatch')
+        
+        # Get foreign collection
+        foreign_collection, is_jsonlite = self._get_foreign_collection(from_collection)
+        
+        if foreign_collection is None:
+            # Foreign collection not found - set empty arrays
+            for doc in self._data:
+                doc[output_field] = []
+            return self
+        
+        # Fetch all foreign documents (apply restrictSearchWithMatch if provided)
+        if restrict_match:
+            foreign_docs = list(foreign_collection.find(restrict_match))
+        else:
+            foreign_docs = list(foreign_collection.find({}))
+        
+        new_data = []
+        for doc in self._data:
+            result_doc = deepcopy(doc)
+            
+            # Evaluate startWith expression for this document
+            if isinstance(start_with, str) and start_with.startswith('$'):
+                # Field reference
+                field_name = start_with[1:]
+                start_values = [doc.get(field_name)]
+            elif isinstance(start_with, str) and start_with.startswith('$$'):
+                # Variable reference (shouldn't happen in graphLookup, but handle it)
+                start_values = [start_with]
+            else:
+                # Literal value
+                start_values = [start_with]
+            
+            # Handle array start values
+            if start_values and isinstance(start_values[0], list):
+                start_values = start_values[0]
+            
+            # Filter out None/null start values
+            start_values = [v for v in start_values if v is not None]
+            
+            # Perform recursive traversal
+            # Track visited documents to avoid cycles - use a tuple of identifying fields
+            visited_docs = set()
+            graph_results = []
+            
+            def get_doc_key(doc):
+                """Create a unique key for a document based on its content."""
+                # Use all field values to create a unique identifier
+                items = sorted((k, str(v)) for k, v in doc.items() if not k.startswith('_'))
+                return tuple(items)
+            
+            def traverse(current_values, depth):
+                """Recursively traverse the graph."""
+                nonlocal visited_docs, graph_results
+                
+                # Check maxDepth
+                if max_depth is not None and depth > max_depth:
+                    return
+                
+                # Find matching documents at this level
+                next_values = []
+                
+                for foreign_doc in foreign_docs:
+                    foreign_value = foreign_doc.get(connect_to_field)
+                    
+                    # Check if this document matches any of the current values
+                    if foreign_value in current_values:
+                        # Create a unique key for this document
+                        doc_key = get_doc_key(foreign_doc)
+                        
+                        # Skip if we've already visited this document
+                        if doc_key in visited_docs:
+                            continue
+                        
+                        # Mark this document as visited
+                        visited_docs.add(doc_key)
+                        
+                        # Add depth field if requested
+                        if depth_field:
+                            match_doc = deepcopy(foreign_doc)
+                            match_doc[depth_field] = depth
+                            graph_results.append(match_doc)
+                        else:
+                            graph_results.append(foreign_doc)
+                        
+                        # Get value for next level traversal (connectFromField)
+                        next_val = foreign_doc.get(connect_from_field)
+                        if next_val is not None:
+                            if isinstance(next_val, list):
+                                # Filter out None values
+                                for v in next_val:
+                                    if v is not None:
+                                        next_values.append(v)
+                            else:
+                                next_values.append(next_val)
+                
+                # Recurse to next level with ALL accumulated next_values
+                if next_values and (max_depth is None or depth < max_depth):
+                    traverse(next_values, depth + 1)
+            
+            # Start traversal from depth 0
+            if start_values:
+                traverse(start_values, 0)
+            
+            result_doc[output_field] = graph_results
+            new_data.append(result_doc)
+        
+        self._data = new_data
+        return self
+    
     def aggregate(self, pipeline: List[Dict]) -> 'AggregationCursor':
         """Execute aggregation pipeline stages."""
         for stage in pipeline:
@@ -1566,6 +1712,8 @@ class AggregationCursor:
                     self._unwind(spec)
                 elif op == '$lookup':
                     self._lookup(spec)
+                elif op == '$graphLookup':
+                    self._graph_lookup(spec)
         return self
     
     def all(self) -> List[Dict]:

@@ -343,7 +343,7 @@
 
 ## 🚀 v1.2 开发中 (2026-03-28 ~ )
 
-**当前重点**: 聚合管道增强 - $lookup 左外连接
+**当前重点**: 聚合管道增强 - 递归连接与高级聚合
 
 #### 已完成 (v1.2-alpha)
 - [x] **$lookup 聚合阶段** ✅ (2026-03-28)
@@ -354,10 +354,19 @@
   - 独立 JSONlite 支持（兄弟 .json 文件连接）✅
   - 与所有聚合阶段兼容 ($match, $unwind, $project 等) ✅
   - 10 个综合测试全部通过 ✅
-  - 总测试数：379 tests passing ✅
+- [x] **$graphLookup 递归连接** ✅ (2026-03-28)
+  - 递归图遍历 ✅
+  - startWith, connectFromField, connectToField 语义 ✅
+  - maxDepth 深度限制 ✅
+  - depthField 深度字段标记 ✅
+  - restrictSearchWithMatch 搜索过滤 ✅
+  - 循环检测 (避免无限递归) ✅
+  - 支持数组连接字段 ✅
+  - MongoClient/Database 集成支持 ✅
+  - 11 个综合测试全部通过 ✅
+  - 总测试数：390 tests passing ✅
 
 #### v1.2 候选功能
-- [ ] $graphLookup (递归连接)
 - [ ] $facet (多面聚合)
 - [ ] $bucket / $bucketAuto (分桶聚合)
 - [ ] 更多聚合表达式操作符
@@ -367,4 +376,4 @@
 ---
 
 **创建时间**: 2026-03-20  
-**最后更新**: 2026-03-28 (v1.2.0-alpha $lookup 完成)
+**最后更新**: 2026-03-28 (v1.2.0-alpha $graphLookup 完成)
