@@ -5,6 +5,56 @@ All notable changes to JSONLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-03-27
+
+### Added
+- **Geographic Spatial Queries** - Full MongoDB-compatible geospatial support
+  - `$near` operator with `$maxDistance` and `$minDistance` filtering
+  - `$geoWithin` operator with `$box`, `$center`, and GeoJSON Polygon support
+  - `$geoIntersects` operator for point-polygon intersection testing
+  - Haversine distance calculation for Earth sphere distances
+  - Coordinate extraction (supports [lng,lat], GeoJSON Point, {lng,lat} formats)
+  - Point-in-polygon判断 (ray casting algorithm)
+  - `Cursor.near()` chainable API for fluent geospatial queries
+- **Geospatial Indexing** - Geohash-based spatial index
+  - Geohash encoding/decoding
+  - Automatic index maintenance (insert/update/delete)
+  - Optimized `$near` and `$geoWithin` queries
+- **Full-Text Search Index** - Optimized text search
+  - Inverted index implementation
+  - TF-IDF scoring for result ranking
+  - Tokenization and stop word filtering
+  - Automatic index maintenance
+- **Multi-Database/Collection Management** - pymongo-compatible API
+  - `MongoClient` class for database client
+  - `Database` class for managing multiple collections
+  - `Collection` class wrapping JSONLite instances
+- **Network Mode** - Client-server architecture
+  - `JSONLiteServer` TCP server with JSON protocol
+  - `RemoteMongoClient` client proxy
+  - Optional HMAC authentication
+  - Full CRUD/aggregation/index support over network
+- **Data Compression** - Gzip compression support
+  - Configurable compression level (1-9)
+  - Automatic compression detection
+  - Compatible with all features (indexes/queries/special types)
+- **Encryption** - AES-256-GCM encryption
+  - PBKDF2-SHA256 key derivation (100,000 iterations)
+  - Automatic encryption detection (ENCR magic number)
+  - Compatible with compression (compress-then-encrypt)
+  - Full feature compatibility (indexes/queries/aggregation/MongoClient)
+
+### Changed
+- Test suite expanded from 309 to 369 tests (+60 tests)
+- All v1.1 features include comprehensive test coverage
+
+### Security
+- AES-256-GCM encryption for sensitive data
+- HMAC authentication for network mode
+- PBKDF2-SHA256 with 100k iterations for key derivation
+
+---
+
 ## [1.0.0] - 2026-03-21
 
 ### Added
@@ -47,17 +97,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Key Features |
 |---------|------|--------------|
-| Unreleased | 2026-03-21 | Transactions, Query Cache, Indexes, Aggregation |
+| 1.1.0 | 2026-03-27 | Geospatial Queries, Full-Text Index, Multi-DB, Network Mode, Compression, Encryption |
+| 1.0.0 | 2026-03-21 | Transactions, Query Cache, Indexes, Aggregation, PyPI Release |
 | 0.1.0 | 2026-03-20 | Initial Release, Basic CRUD, Query Operators |
 
 ---
 
-## Upcoming (v1.0.0)
+## Upcoming (v1.2.0)
 
-- Complete API reference documentation
-- Usage tutorials
-- MongoDB → JSONLite migration guide
-- Expanded example code library
-- PyPI release
-- GitHub Actions CI/CD pipeline
-- Test coverage > 85%
+**Planned Features:**
+- Advanced aggregation stages ($lookup, $facet, $bucket)
+- Change streams / real-time notifications
+- Schema validation
+- GridFS-like large file storage
+- Performance optimizations for large datasets
+- MongoDB 5.0+ feature parity
+
+---
