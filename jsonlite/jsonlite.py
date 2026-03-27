@@ -1102,7 +1102,45 @@ class AggregationCursor:
             self._data = result
         else:
             # Handle literal _id (all docs in one group)
-            self._data = [{'_id': _id_expr, 'count': len(self._data)}]
+            grouped_doc = {'_id': _id_expr}
+            docs = self._data
+            
+            # Process accumulators
+            for field, expr in group_spec.items():
+                if field == '_id':
+                    continue
+                if isinstance(expr, dict):
+                    for op, val in expr.items():
+                        if op == '$sum':
+                            if isinstance(val, str) and val.startswith('$'):
+                                grouped_doc[field] = sum(d.get(val[1:], 0) for d in docs if isinstance(d.get(val[1:]), (int, float)))
+                            else:
+                                grouped_doc[field] = sum(val for d in docs)
+                        elif op == '$avg':
+                            if isinstance(val, str) and val.startswith('$'):
+                                vals = [d.get(val[1:]) for d in docs if isinstance(d.get(val[1:]), (int, float))]
+                                grouped_doc[field] = sum(vals) / len(vals) if vals else 0
+                        elif op == '$count':
+                            grouped_doc[field] = len(docs)
+                        elif op == '$min':
+                            if isinstance(val, str) and val.startswith('$'):
+                                vals = [d.get(val[1:]) for d in docs if d.get(val[1:]) is not None]
+                                grouped_doc[field] = min(vals) if vals else None
+                        elif op == '$max':
+                            if isinstance(val, str) and val.startswith('$'):
+                                vals = [d.get(val[1:]) for d in docs if d.get(val[1:]) is not None]
+                                grouped_doc[field] = max(vals) if vals else None
+                        elif op == '$first':
+                            grouped_doc[field] = docs[0].get(val[1:]) if val.startswith('$') else val
+                        elif op == '$last':
+                            grouped_doc[field] = docs[-1].get(val[1:]) if val.startswith('$') else val
+                        elif op == '$push':
+                            if isinstance(val, str) and val.startswith('$'):
+                                grouped_doc[field] = [d.get(val[1:]) for d in docs]
+                            else:
+                                grouped_doc[field] = [val] * len(docs)
+            
+            self._data = [grouped_doc]
         return self
     
     def _project(self, projection: Dict) -> 'AggregationCursor':
@@ -1690,6 +1728,100 @@ class AggregationCursor:
         self._data = new_data
         return self
     
+    def _facet(self, facet_spec: Dict) -> 'AggregationCursor':
+        """$facet stage: process multiple aggregation pipelines on the same input.
+        
+        Each pipeline runs independently on the same input documents and produces
+        a separate array of results. The output is a single document with each
+        facet name as a key containing its results array.
+        
+        MongoDB syntax:
+        {
+            $facet: {
+                <facet1_name>: [ <stage1>, <stage2>, ... ],
+                <facet2_name>: [ <stage1>, <stage2>, ... ],
+                ...
+            }
+        }
+        
+        Output format:
+        [
+            {
+                <facet1_name>: [<results>],
+                <facet2_name>: [<results>],
+                ...
+            }
+        ]
+        
+        Args:
+            facet_spec: Dictionary mapping facet names to pipeline arrays
+            
+        Example:
+            db.products.aggregate([
+                {
+                    $facet: {
+                        "by_category": [
+                            {"$group": {"_id": "$category", "items": {"$push": "$$ROOT"}}}
+                        ],
+                        "by_price": [
+                            {"$match": {"price": {"$gte": 100}}},
+                            {"$count": "expensive_count"}
+                        ]
+                    }
+                }
+            ])
+            # Returns: [{
+            #   "by_category": [{"_id": "electronics", "items": [...]}],
+            #   "by_price": [{"expensive_count": 42}]
+            # }]
+        """
+        from copy import deepcopy
+        
+        # Store original input data
+        original_data = deepcopy(self._data)
+        
+        # Process each facet pipeline independently
+        facet_results = {}
+        
+        for facet_name, pipeline in facet_spec.items():
+            # Create a fresh cursor with the original data for this facet
+            facet_cursor = AggregationCursor(deepcopy(original_data), self._db)
+            
+            # Execute each stage in this facet's pipeline
+            for stage in pipeline:
+                for op, spec in stage.items():
+                    if op == '$match':
+                        facet_cursor._match(spec)
+                    elif op == '$group':
+                        facet_cursor._group(spec)
+                    elif op == '$project':
+                        facet_cursor._project(spec)
+                    elif op == '$sort':
+                        facet_cursor._sort(spec)
+                    elif op == '$skip':
+                        facet_cursor._skip(spec)
+                    elif op == '$limit':
+                        facet_cursor._limit(spec)
+                    elif op == '$count':
+                        facet_cursor._count(spec if isinstance(spec, str) else 'count')
+                    elif op == '$unwind':
+                        facet_cursor._unwind(spec)
+                    elif op == '$lookup':
+                        facet_cursor._lookup(spec)
+                    elif op == '$graphLookup':
+                        facet_cursor._graph_lookup(spec)
+                    elif op == '$facet':
+                        # Nested facets are supported recursively
+                        facet_cursor._facet(spec)
+            
+            # Store results for this facet
+            facet_results[facet_name] = facet_cursor._data
+        
+        # Replace data with single document containing all facet results
+        # If original data was empty, still produce one result document
+        self._data = [facet_results]
+        return self
+    
     def aggregate(self, pipeline: List[Dict]) -> 'AggregationCursor':
         """Execute aggregation pipeline stages."""
         for stage in pipeline:
@@ -1714,6 +1846,8 @@ class AggregationCursor:
                     self._lookup(spec)
                 elif op == '$graphLookup':
                     self._graph_lookup(spec)
+                elif op == '$facet':
+                    self._facet(spec)
         return self
     
     def all(self) -> List[Dict]:
