@@ -1152,9 +1152,14 @@ class AggregationCursor:
                 
                 for field, source in include_fields.items():
                     if isinstance(source, str):
-                        # Field reference
+                        # Field reference - may include dot notation
                         if source in doc:
                             new_doc[field] = doc[source]
+                        elif '.' in source:
+                            # Dot notation - use _get_value_by_path
+                            value = self._db._get_value_by_path(doc, source)
+                            if value is not None:
+                                new_doc[field] = value
                     elif isinstance(source, dict):
                         # Expression
                         new_doc[field] = self._eval_expr(source, doc)
@@ -1290,6 +1295,255 @@ class AggregationCursor:
         self._data = new_data
         return self
     
+    def _get_foreign_collection(self, from_collection: str):
+        """Get a foreign collection for $lookup.
+        
+        Returns a tuple of (collection_instance, is_jsonlite_bool).
+        - If using MongoClient/Collection: returns (Collection, False)
+        - If using standalone JSONlite: returns (JSONlite, True)
+        """
+        # Check class names to avoid circular imports
+        db_class_name = self._db.__class__.__name__
+        
+        # Try to access via MongoClient/Database hierarchy
+        # Check if self._db has a reference to parent Collection
+        if hasattr(self._db, '_parent_collection') and self._db._parent_collection is not None:
+            # We're in a Collection context
+            collection = self._db._parent_collection
+            if collection.__class__.__name__ == 'Collection' and hasattr(collection, '_database'):
+                db = collection._database
+                return db.get_collection(from_collection), False
+        
+        # Check if self._db is itself a Collection
+        if db_class_name == 'Collection':
+            db = self._db._database
+            return db.get_collection(from_collection), False
+        
+        # Check if self._db is a Database
+        if db_class_name == 'Database':
+            return self._db.get_collection(from_collection), False
+        
+        # Fallback: standalone JSONlite - look for sibling .json file
+        if hasattr(self._db, '_filename'):
+            import os
+            foreign_path = os.path.join(os.path.dirname(self._db._filename), from_collection + '.json')
+            if os.path.exists(foreign_path):
+                return JSONlite(foreign_path), True
+        
+        return None, False
+    
+    def _lookup(self, lookup_spec: Dict) -> 'AggregationCursor':
+        """$lookup stage: perform left outer join with another collection.
+        
+        Supports two syntaxes:
+        
+        1. Basic syntax:
+           {
+               $lookup: {
+                   from: <collection>,
+                   localField: <field>,
+                   foreignField: <field>,
+                   as: <output_array_field>
+               }
+           }
+        
+        2. Pipeline syntax:
+           {
+               $lookup: {
+                   from: <collection>,
+                   let: { <var1>: <expr1>, ... },
+                   pipeline: [ <stage1>, <stage2>, ... ],
+                   as: <output_array_field>
+               }
+           }
+        """
+        from_collection = lookup_spec.get('from')
+        output_field = lookup_spec.get('as', 'looked_up')
+        
+        # Get foreign collection
+        foreign_collection, is_jsonlite = self._get_foreign_collection(from_collection)
+        
+        if foreign_collection is None:
+            # Foreign collection not found - set empty arrays
+            for doc in self._data:
+                doc[output_field] = []
+            return self
+        
+        # Fetch all foreign documents
+        if is_jsonlite:
+            foreign_docs = list(foreign_collection.find({}))
+        else:
+            foreign_docs = list(foreign_collection.find())
+        
+        # Check if using pipeline syntax
+        if 'pipeline' in lookup_spec:
+            # Pipeline syntax with let variables
+            let_vars = lookup_spec.get('let', {})
+            pipeline_stages = lookup_spec['pipeline']
+            
+            new_data = []
+            for doc in self._data:
+                # Build variables for this document
+                vars_context = {}
+                for var_name, expr in let_vars.items():
+                    if isinstance(expr, str) and expr.startswith('$'):
+                        field_name = expr[1:]
+                        vars_context[var_name] = doc.get(field_name)
+                    else:
+                        vars_context[var_name] = expr
+                
+                # Filter foreign docs with pipeline
+                matched_docs = []
+                
+                for foreign_doc in foreign_docs:
+                    # Apply pipeline stages with variable substitution
+                    pipeline_match = True
+                    for stage in pipeline_stages:
+                        if '$match' in stage:
+                            match_spec = stage['$match']
+                            # Substitute $$variables
+                            substituted_spec = self._substitute_vars(match_spec, vars_context)
+                            
+                            # Handle $expr - evaluate aggregation expressions
+                            if '$expr' in substituted_spec:
+                                expr_spec = substituted_spec.pop('$expr')
+                                if not self._eval_lookup_expr(expr_spec, foreign_doc, vars_context):
+                                    pipeline_match = False
+                                    break
+                                # Also check remaining conditions (e.g., {"$expr": ..., "city": "NYC"})
+                                if substituted_spec and not self._db._match_filter(substituted_spec, foreign_doc):
+                                    pipeline_match = False
+                                    break
+                            else:
+                                if not self._db._match_filter(substituted_spec, foreign_doc):
+                                    pipeline_match = False
+                                    break
+                    
+                    if pipeline_match:
+                        matched_docs.append(foreign_doc)
+                
+                result_doc = deepcopy(doc)
+                result_doc[output_field] = matched_docs
+                new_data.append(result_doc)
+            
+            self._data = new_data
+        else:
+            # Basic syntax: localField == foreignField
+            local_field = lookup_spec.get('localField')
+            foreign_field = lookup_spec.get('foreignField')
+            
+            # Perform join
+            new_data = []
+            for doc in self._data:
+                local_value = doc.get(local_field)
+                matched = [d for d in foreign_docs if d.get(foreign_field) == local_value]
+                result_doc = deepcopy(doc)
+                result_doc[output_field] = matched
+                new_data.append(result_doc)
+            
+            self._data = new_data
+        
+        return self
+    
+    def _eval_lookup_expr(self, expr: Dict, doc: Dict, vars_context: Dict) -> bool:
+        """Evaluate an aggregation expression for $lookup pipeline.
+        
+        Supports: $eq, $ne, $gt, $lt, $gte, $lte, $and, $or, $not
+        """
+        for op, args in expr.items():
+            if op == '$eq':
+                if len(args) != 2:
+                    return False
+                left = self._eval_lookup_expr_value(args[0], doc, vars_context)
+                right = self._eval_lookup_expr_value(args[1], doc, vars_context)
+                return left == right
+            elif op == '$ne':
+                if len(args) != 2:
+                    return False
+                left = self._eval_lookup_expr_value(args[0], doc, vars_context)
+                right = self._eval_lookup_expr_value(args[1], doc, vars_context)
+                return left != right
+            elif op == '$gt':
+                if len(args) != 2:
+                    return False
+                left = self._eval_lookup_expr_value(args[0], doc, vars_context)
+                right = self._eval_lookup_expr_value(args[1], doc, vars_context)
+                return left > right
+            elif op == '$lt':
+                if len(args) != 2:
+                    return False
+                left = self._eval_lookup_expr_value(args[0], doc, vars_context)
+                right = self._eval_lookup_expr_value(args[1], doc, vars_context)
+                return left < right
+            elif op == '$gte':
+                if len(args) != 2:
+                    return False
+                left = self._eval_lookup_expr_value(args[0], doc, vars_context)
+                right = self._eval_lookup_expr_value(args[1], doc, vars_context)
+                return left >= right
+            elif op == '$lte':
+                if len(args) != 2:
+                    return False
+                left = self._eval_lookup_expr_value(args[0], doc, vars_context)
+                right = self._eval_lookup_expr_value(args[1], doc, vars_context)
+                return left <= right
+            elif op == '$and':
+                return all(self._eval_lookup_expr(sub_expr, doc, vars_context) for sub_expr in args)
+            elif op == '$or':
+                return any(self._eval_lookup_expr(sub_expr, doc, vars_context) for sub_expr in args)
+            elif op == '$not':
+                return not self._eval_lookup_expr(args, doc, vars_context)
+        return False
+    
+    def _eval_lookup_expr_value(self, value: Any, doc: Dict, vars_context: Dict) -> Any:
+        """Evaluate a value in an expression context for $lookup.
+        
+        - $$var: variable reference
+        - $field: document field reference
+        - literal: return as-is
+        """
+        if isinstance(value, str):
+            if value.startswith('$$'):
+                # Variable reference
+                var_name = value[2:]
+                return vars_context.get(var_name)
+            elif value.startswith('$'):
+                # Field reference
+                field_name = value[1:]
+                return self._db._get_value_by_path(doc, field_name)
+            else:
+                return value
+        elif isinstance(value, dict):
+            # Nested expression - evaluate it
+            return self._eval_lookup_expr(value, doc, vars_context)
+        else:
+            return value
+    
+    def _substitute_vars(self, spec: Dict, vars_context: Dict) -> Dict:
+        """Substitute $$variables in a spec with actual values."""
+        import re
+        result = deepcopy(spec)
+        
+        for key, value in result.items():
+            if isinstance(value, str):
+                # Check for $$var syntax
+                if value.startswith('$$'):
+                    var_name = value[2:]
+                    if var_name in vars_context:
+                        result[key] = vars_context[var_name]
+                elif value.startswith('$'):
+                    # Keep field references as-is
+                    pass
+            elif isinstance(value, dict):
+                result[key] = self._substitute_vars(value, vars_context)
+            elif isinstance(value, list):
+                result[key] = [
+                    self._substitute_vars(item, vars_context) if isinstance(item, dict) else item
+                    for item in value
+                ]
+        
+        return result
+    
     def aggregate(self, pipeline: List[Dict]) -> 'AggregationCursor':
         """Execute aggregation pipeline stages."""
         for stage in pipeline:
@@ -1310,6 +1564,8 @@ class AggregationCursor:
                     self._count(spec if isinstance(spec, str) else 'count')
                 elif op == '$unwind':
                     self._unwind(spec)
+                elif op == '$lookup':
+                    self._lookup(spec)
         return self
     
     def all(self) -> List[Dict]:
@@ -2477,6 +2733,41 @@ class JSONlite:
         next_id = max(ids) + 1 if ids else 1
         return next_id
 
+    def _get_value_by_path(self, record: Dict, path: str) -> Any:
+        """Get value from record by dot notation path, supporting arrays.
+        
+        For array fields, returns a list of all values matching the path.
+        E.g., if record = {'customer': [{'name': 'Alice'}, {'name': 'Bob'}]}
+        Then _get_value_by_path(record, 'customer.name') returns ['Alice', 'Bob']
+        
+        For non-array fields, returns the single value.
+        """
+        parts = path.split('.')
+        current = record
+        
+        for i, part in enumerate(parts):
+            if isinstance(current, dict):
+                if part not in current:
+                    return None
+                current = current[part]
+            elif isinstance(current, list):
+                # Array - collect values from all elements
+                results = []
+                for item in current:
+                    if isinstance(item, dict):
+                        sub_path = '.'.join(parts[i:])
+                        val = self._get_value_by_path(item, sub_path)
+                        if val is not None:
+                            if isinstance(val, list):
+                                results.extend(val)
+                            else:
+                                results.append(val)
+                return results if results else None
+            else:
+                return None
+        
+        return current
+    
     def _match_filter(self, filter: Dict, record: Dict, deep: int = 0) -> bool:
         # fuck regex
         # convert {"$regex": "a", "$options": "i"} to {new_regex_op: "a"}
@@ -2563,21 +2854,69 @@ class JSONlite:
                     else:
                         raise ValueError('Unknown operator: %s' % operator)
                     if function:
-                        if key not in record:
-                            return False
-                        if isinstance(cond_value, (list, tuple)):
-                            if operator in ['$in', '$all']:
+                        # Handle dot notation for nested/array fields
+                        if '.' in key:
+                            value = self._get_value_by_path(record, key)
+                            if value is None:
+                                return False
+                            # For arrays, check if any element matches
+                            if isinstance(value, list):
+                                if operator in ['$in', '$all']:
+                                    if not function(value, cond_value):
+                                        return False
+                                else:
+                                    # Check if any array element satisfies the condition
+                                    matched = False
+                                    for v in value:
+                                        try:
+                                            if isinstance(cond_value, (list, tuple)):
+                                                if function(v, *cond_value):
+                                                    matched = True
+                                                    break
+                                            else:
+                                                if function(v, cond_value):
+                                                    matched = True
+                                                    break
+                                        except:
+                                            pass
+                                    if not matched:
+                                        return False
+                            else:
+                                if isinstance(cond_value, (list, tuple)):
+                                    if not function(value, *cond_value):
+                                        return False
+                                else:
+                                    if not function(value, cond_value):
+                                        return False
+                        else:
+                            if key not in record:
+                                return False
+                            if isinstance(cond_value, (list, tuple)):
+                                if operator in ['$in', '$all']:
+                                    if not function(record.get(key), cond_value):
+                                        return False
+                                else:
+                                    if not function(record.get(key), *cond_value):
+                                        return False
+                            else:
                                 if not function(record.get(key), cond_value):
                                     return False
-                            else:
-                                if not function(record.get(key), *cond_value):
-                                    return False
-                        else:
-                            if not function(record.get(key), cond_value):
-                                return False
                 else:
-                    if key not in record or record[key] != condition:
-                        return False
+                    # Handle dot notation for nested/array fields
+                    if '.' in key:
+                        value = self._get_value_by_path(record, key)
+                        if value is None:
+                            return False
+                        # For arrays, check if any element matches
+                        if isinstance(value, list):
+                            if condition not in value:
+                                return False
+                        else:
+                            if value != condition:
+                                return False
+                    else:
+                        if key not in record or record[key] != condition:
+                            return False
         return True
 
     def _raw_insert_one(self, record: Dict) -> int:
@@ -3454,6 +3793,8 @@ class Collection:
         self._db_path = database._db_path
         self._collection_file = os.path.join(self._db_path, f"{name}.json")
         self._jsonlite = JSONlite(self._collection_file, **kwargs)
+        # Set parent reference for $lookup to access sibling collections
+        self._jsonlite._parent_collection = self
     
     @property
     def name(self) -> str:
