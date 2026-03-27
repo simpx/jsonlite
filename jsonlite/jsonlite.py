@@ -5,6 +5,7 @@ import re
 import tempfile
 import base64
 import math
+import gzip
 from dataclasses import dataclass
 from functools import wraps
 from typing import List, Dict, Union, Any, Optional, Tuple
@@ -59,6 +60,55 @@ def _fast_loads(s: str) -> Any:
     if _USE_ORJSON:
         return orjson.loads(s)
     return json.loads(s)
+
+
+# =============================================================================
+# Compression Helper Functions
+# =============================================================================
+
+# Gzip magic number for detecting compressed files
+_GZIP_MAGIC = b'\x1f\x8b'
+
+
+def _compress_data(data: bytes, level: int = 6) -> bytes:
+    """Compress data using gzip.
+    
+    Args:
+        data: Raw bytes to compress
+        level: Compression level (1-9, default 6)
+               1 = fastest, 9 = best compression
+    
+    Returns:
+        Compressed bytes
+    """
+    return gzip.compress(data, compresslevel=level)
+
+
+def _decompress_data(data: bytes) -> bytes:
+    """Decompress gzip data.
+    
+    Args:
+        data: Compressed bytes
+    
+    Returns:
+        Decompressed bytes
+    
+    Raises:
+        gzip.BadGzipFile: If data is not valid gzip
+    """
+    return gzip.decompress(data)
+
+
+def _is_compressed(data: bytes) -> bool:
+    """Check if data appears to be gzip compressed.
+    
+    Args:
+        data: Bytes to check
+    
+    Returns:
+        True if data starts with gzip magic number
+    """
+    return data.startswith(_GZIP_MAGIC)
 
 
 # =============================================================================
@@ -2122,17 +2172,23 @@ def _deep_equals(a: Any, b: Any) -> bool:
 
 
 class JSONlite:
-    def __init__(self, filename: str, cache_enabled: bool = True, cache_size: int = 100):
+    def __init__(self, filename: str, cache_enabled: bool = True, cache_size: int = 100,
+                 compression_enabled: bool = False, compression_level: int = 6):
         """Initialize JSONlite database.
         
         Args:
             filename: Path to the JSON database file
             cache_enabled: Enable query result caching (default: True)
             cache_size: Maximum cached queries (default: 100)
+            compression_enabled: Enable gzip compression for data storage (default: False)
+            compression_level: Gzip compression level 1-9 (default: 6)
+                              1 = fastest, 9 = best compression
         """
         self._filename = filename
         self._cache_enabled = cache_enabled
         self._cache = QueryCache(max_size=cache_size) if cache_enabled else None
+        self._compression_enabled = compression_enabled
+        self._compression_level = compression_level
         self.operators = {
             '$gt': lambda v, c: v is not None and v > c,
             '$lt': lambda v, c: v is not None and v < c,
@@ -2153,8 +2209,8 @@ class JSONlite:
         if not os.path.exists(filename):
             self._touch_database()
         else:
-            # Reload to get index metadata
-            with open(filename, 'r', encoding='utf-8') as file:
+            # Reload to get index metadata (read as binary to support compression)
+            with open(filename, 'rb') as file:
                 self._load_database(file)
             # Rebuild indexes from metadata
             self._rebuild_indexes_from_metadata()
@@ -2180,14 +2236,25 @@ class JSONlite:
 
     def _load_database(self, file):
         file.seek(0)
-        if not file.read(1):  # init database if file is empty
+        content_bytes = file.read()
+        
+        # Check if file is empty
+        if not content_bytes:
             self._database = {"data": [], "_indexes": []}
         else:
-            file.seek(0)
-            content = file.read()
+            # Detect if content is compressed (gzip magic number)
+            if _is_compressed(content_bytes):
+                # Decompress gzip data
+                decompressed = _decompress_data(content_bytes)
+                content = decompressed.decode('utf-8')
+            else:
+                # Uncompressed - decode as UTF-8
+                content = content_bytes.decode('utf-8')
+            
             # orjson doesn't support object_hook, so use standard json for loading
             # to preserve datetime/binary deserialization
             self._database = json.loads(content, object_hook=self._object_hook)
+        
         self._data = self._database["data"]
         # Load index metadata (but rebuild from data)
         self._index_metadata = self._database.get("_indexes", [])
@@ -2195,7 +2262,19 @@ class JSONlite:
     def _save_database(self, file):
         # Save index metadata
         self._database["_indexes"] = self._index_manager.list_indexes()
-        json.dump(self._database, file, ensure_ascii=False, indent=4, default=self._default_serializer)
+        
+        # Serialize to JSON string first
+        json_str = json.dumps(self._database, ensure_ascii=False, indent=4, default=self._default_serializer)
+        
+        if self._compression_enabled:
+            # Compress and write binary
+            json_bytes = json_str.encode('utf-8')
+            compressed = _compress_data(json_bytes, self._compression_level)
+            file.write(compressed)
+        else:
+            # Write uncompressed JSON (encode to bytes for binary file)
+            file.write(json_str.encode('utf-8'))
+        
         file.flush()
         os.fsync(file.fileno())
 
@@ -2206,10 +2285,11 @@ class JSONlite:
             in_transaction = instance._transaction_manager.is_active()
             
             while True:
-                with open(filename, 'a'), open(filename, 'r+', encoding='utf-8') as file:
+                # Open in binary mode to support both compressed and uncompressed files
+                with open(filename, 'ab'), open(filename, 'r+b') as file:
                     fcntl.flock(file, fcntl.LOCK_EX)
                     try:
-                        with open(filename, 'a'), open(filename, 'r+', encoding='utf-8') as file2:
+                        with open(filename, 'ab'), open(filename, 'r+b') as file2:
                             inode_before = os.fstat(file.fileno()).st_ino
                             inode_after = os.fstat(file2.fileno()).st_ino
                             if inode_before == inode_after:
@@ -2220,8 +2300,8 @@ class JSONlite:
                                 result = method(instance, *args, **kwargs)
                                 # Only save to disk if not in a transaction
                                 if not in_transaction:
-                                    with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(filename), mode='w',
-                                                                     encoding='utf-8') as temp_file:
+                                    # Always use binary mode for temp file (works for both compressed and uncompressed)
+                                    with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(filename), mode='wb') as temp_file:
                                         instance._save_database(temp_file)
                                     os.rename(temp_file.name, filename)
                                 return result
@@ -2237,7 +2317,8 @@ class JSONlite:
             # Don't reload from disk if we're in a transaction (use in-memory state)
             if not instance._transaction_manager.is_active():
                 filename = instance._filename
-                with open(filename, 'r', encoding='utf-8') as file:
+                # Read as binary to support both compressed and uncompressed files
+                with open(filename, 'rb') as file:
                     instance._load_database(file)
                     instance._rebuild_indexes_from_metadata()
             return method(instance, *args, **kwargs)
@@ -3216,18 +3297,19 @@ class Collection:
     This class provides a pymongo-compatible interface to a JSONlite instance.
     """
     
-    def __init__(self, database: 'Database', name: str):
+    def __init__(self, database: 'Database', name: str, **kwargs):
         """Initialize a collection.
         
         Args:
             database: Parent Database instance
             name: Collection name
+            **kwargs: Additional options passed to JSONlite (compression_enabled, compression_level, etc.)
         """
         self._database = database
         self._name = name
         self._db_path = database._db_path
         self._collection_file = os.path.join(self._db_path, f"{name}.json")
-        self._jsonlite = JSONlite(self._collection_file)
+        self._jsonlite = JSONlite(self._collection_file, **kwargs)
     
     @property
     def name(self) -> str:
@@ -3382,7 +3464,7 @@ class Database:
             Collection instance
         """
         if name not in self._collections:
-            self._collections[name] = Collection(self, name)
+            self._collections[name] = Collection(self, name, **self._client._collection_kwargs)
         return self._collections[name]
     
     def __getattr__(self, name: str) -> Collection:
@@ -3549,10 +3631,11 @@ class MongoClient:
         
         Args:
             data_dir: Base directory for all databases (default: './jsonlite_data')
-            **kwargs: Additional options (ignored for compatibility)
+            **kwargs: Additional options for collections (compression_enabled, compression_level, cache_enabled, etc.)
         """
         self._data_dir = data_dir
         self._databases: Dict[str, Database] = {}
+        self._collection_kwargs = kwargs
         
         # Create data directory if it doesn't exist
         if not os.path.exists(self._data_dir):
