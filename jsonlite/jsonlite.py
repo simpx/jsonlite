@@ -783,6 +783,257 @@ class QueryCache:
         self._misses = 0
 
 
+class QueryPlanner:
+    """Query planner and optimizer.
+    
+    Analyzes query patterns, suggests optimal indexes, and optimizes
+    query execution order for better performance.
+    
+    Features:
+    - Query pattern analysis and tracking
+    - Index suggestions based on query patterns
+    - Query optimization (reorder filter conditions)
+    - Query statistics and profiling
+    """
+    
+    def __init__(self):
+        """Initialize query planner."""
+        self._query_history: List[Dict] = []
+        self._field_usage: Dict[str, int] = {}  # field -> usage count
+        self._filter_patterns: Dict[str, int] = {}  # pattern hash -> count
+        self._slow_queries: List[Dict] = []
+        self._total_queries = 0
+        self._optimized_queries = 0
+    
+    def analyze_filter(self, filter: Dict) -> Dict[str, Any]:
+        """Analyze a filter and extract field usage information.
+        
+        Args:
+            filter: Query filter dict
+        
+        Returns:
+            Analysis result with fields, operators, and suggestions
+        """
+        fields = []
+        operators = []
+        
+        def extract_fields(obj: Any, path: str = "") -> None:
+            """Recursively extract field names from filter."""
+            # Skip callable objects (e.g., lambda functions used as filters)
+            if callable(obj):
+                return
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    # Skip callable keys (custom query functions)
+                    if callable(key):
+                        continue
+                    if isinstance(key, str) and key.startswith('$'):
+                        operators.append(key)
+                        extract_fields(value, path)
+                    elif isinstance(key, str):
+                        field_path = f"{path}.{key}" if path else key
+                        fields.append(field_path)
+                        extract_fields(value, field_path)
+            elif isinstance(obj, list):
+                for item in obj:
+                    extract_fields(item, path)
+        
+        extract_fields(filter)
+        
+        # Update field usage statistics
+        for field in fields:
+            self._field_usage[field] = self._field_usage.get(field, 0) + 1
+        
+        return {
+            "fields": fields,
+            "operators": operators,
+            "field_count": len(fields),
+            "operator_count": len(operators)
+        }
+    
+    def record_query(self, filter: Dict, execution_time_ms: float, 
+                     result_count: int, used_index: Optional[str] = None) -> None:
+        """Record a query for pattern analysis.
+        
+        Args:
+            filter: Query filter
+            execution_time_ms: Query execution time in milliseconds
+            result_count: Number of results returned
+            used_index: Name of index used (if any)
+        """
+        self._total_queries += 1
+        analysis = self.analyze_filter(filter)
+        
+        # Create pattern signature
+        pattern = f"fields:{','.join(sorted(analysis['fields']))}|ops:{','.join(sorted(analysis['operators']))}"
+        pattern_hash = hashlib.md5(pattern.encode()).hexdigest()[:8]
+        self._filter_patterns[pattern_hash] = self._filter_patterns.get(pattern_hash, 0) + 1
+        
+        # Record query
+        query_record = {
+            "filter": filter,
+            "fields": analysis["fields"],
+            "operators": analysis["operators"],
+            "execution_time_ms": execution_time_ms,
+            "result_count": result_count,
+            "used_index": used_index,
+            "pattern": pattern_hash,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        self._query_history.append(query_record)
+        
+        # Track slow queries (> 100ms)
+        if execution_time_ms > 100:
+            self._slow_queries.append(query_record)
+            # Keep only last 100 slow queries
+            if len(self._slow_queries) > 100:
+                self._slow_queries = self._slow_queries[-100:]
+        
+        # Keep only last 1000 queries
+        if len(self._query_history) > 1000:
+            self._query_history = self._query_history[-1000:]
+    
+    def suggest_indexes(self, existing_indexes: Optional[List[Dict]] = None) -> List[Dict]:
+        """Suggest indexes based on query patterns.
+        
+        Args:
+            existing_indexes: List of existing index definitions
+        
+        Returns:
+            List of suggested index definitions
+        """
+        existing_fields = set()
+        if existing_indexes:
+            for idx in existing_indexes:
+                # Handle 'fields' key (list or dict)
+                if isinstance(idx.get("fields"), list):
+                    existing_fields.update(idx["fields"])
+                elif isinstance(idx.get("fields"), dict):
+                    existing_fields.update(idx["fields"].keys())
+                # Handle 'keys' key (list of tuples like [('age', 1)])
+                elif isinstance(idx.get("keys"), list):
+                    for key_tuple in idx["keys"]:
+                        if isinstance(key_tuple, (list, tuple)) and len(key_tuple) >= 1:
+                            existing_fields.add(key_tuple[0])
+        
+        suggestions = []
+        
+        # Sort fields by usage frequency
+        sorted_fields = sorted(self._field_usage.items(), key=lambda x: x[1], reverse=True)
+        
+        # Suggest indexes for frequently used fields
+        for field, count in sorted_fields[:10]:  # Top 10 fields
+            if field not in existing_fields and count >= 3:  # Used at least 3 times
+                suggestions.append({
+                    "fields": [field],
+                    "name": f"idx_{field.replace('.', '_')}",
+                    "reason": f"Used in {count} queries"
+                })
+        
+        # Analyze slow queries for index opportunities
+        for slow_query in self._slow_queries[-20:]:  # Last 20 slow queries
+            if slow_query.get("used_index") is None and slow_query.get("fields"):
+                field = slow_query["fields"][0]
+                if field not in existing_fields:
+                    # Check if not already suggested
+                    if not any(s["fields"] == [field] for s in suggestions):
+                        suggestions.append({
+                            "fields": [field],
+                            "name": f"idx_{field.replace('.', '_')}_slow",
+                            "reason": f"Slow query ({slow_query['execution_time_ms']:.1f}ms) without index"
+                        })
+        
+        return suggestions
+    
+    def optimize_filter(self, filter: Dict, available_indexes: Optional[List[str]] = None) -> Dict:
+        """Optimize filter by reordering conditions for better performance.
+        
+        Places indexed fields first and equality conditions before range conditions.
+        
+        Args:
+            filter: Original filter dict
+            available_indexes: List of indexed field names
+        
+        Returns:
+            Optimized filter dict
+        """
+        if not filter or not isinstance(filter, dict):
+            return filter
+        
+        available_indexes = available_indexes or []
+        
+        # Categorize conditions
+        indexed_conditions = {}
+        equality_conditions = {}
+        range_conditions = {}
+        other_conditions = {}
+        
+        for key, value in filter.items():
+            if key.startswith('$'):
+                other_conditions[key] = value
+            elif key in available_indexes:
+                indexed_conditions[key] = value
+            elif isinstance(value, dict):
+                # Check if it's a range operator
+                has_range = any(k in value for k in ['$gt', '$lt', '$gte', '$lte', '$ne', '$regex'])
+                has_equality = '$eq' in value
+                if has_range:
+                    range_conditions[key] = value
+                elif has_equality:
+                    equality_conditions[key] = value
+                else:
+                    other_conditions[key] = value
+            else:
+                equality_conditions[key] = value
+        
+        # Reorder: indexed first, then equality, then range, then others
+        optimized = {}
+        optimized.update(indexed_conditions)
+        optimized.update(equality_conditions)
+        optimized.update(range_conditions)
+        optimized.update(other_conditions)
+        
+        if optimized != filter:
+            self._optimized_queries += 1
+        
+        return optimized
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get query planner statistics.
+        
+        Returns:
+            Statistics dictionary
+        """
+        avg_execution_time = 0
+        if self._query_history:
+            avg_execution_time = sum(
+                q["execution_time_ms"] for q in self._query_history
+            ) / len(self._query_history)
+        
+        return {
+            "total_queries": self._total_queries,
+            "optimized_queries": self._optimized_queries,
+            "slow_queries": len(self._slow_queries),
+            "unique_patterns": len(self._filter_patterns),
+            "average_execution_time_ms": round(avg_execution_time, 2),
+            "top_fields": dict(sorted(
+                self._field_usage.items(), 
+                key=lambda x: x[1], 
+                reverse=True
+            )[:10])
+        }
+    
+    def reset(self) -> None:
+        """Reset all query planner statistics."""
+        self._query_history = []
+        self._field_usage = {}
+        self._filter_patterns = {}
+        self._slow_queries = []
+        self._total_queries = 0
+        self._optimized_queries = 0
+
+
 @dataclass
 class InsertOneResult:
     inserted_id: int
@@ -3444,6 +3695,7 @@ class JSONlite:
         self._compression_level = compression_level
         self._encryption_enabled = encryption_enabled
         self._encryption_password = encryption_password
+        self._query_planner = QueryPlanner()
         
         if encryption_enabled and not encryption_password:
             raise ValueError("encryption_password is required when encryption_enabled=True")
@@ -3902,10 +4154,15 @@ class JSONlite:
 
     @_synchronized_read
     def _find(self, filter: Dict, find_all: bool = False) -> List[Dict]:
+        import time
+        start_time = time.perf_counter()
+        
         # Try cache first (only for find_all queries)
         if self._cache_enabled and find_all and self._cache:
             cached = self._cache.get(filter)
             if cached is not None:
+                exec_time_ms = (time.perf_counter() - start_time) * 1000
+                self._query_planner.record_query(filter, exec_time_ms, len(cached), "cache")
                 return cached
         
         if filter == {}:
@@ -3914,9 +4171,24 @@ class JSONlite:
             # Cache the result for empty filter queries
             if self._cache_enabled and find_all and self._cache:
                 self._cache.set(filter, result)
+            exec_time_ms = (time.perf_counter() - start_time) * 1000
+            self._query_planner.record_query(filter, exec_time_ms, len(result), None)
             return result
         
         found_records = []
+        used_index = None
+        
+        # Check if any indexed field is in the filter
+        for idx_info in self._index_metadata:
+            idx_fields = idx_info.get("fields", [])
+            if isinstance(idx_fields, list):
+                for field in idx_fields:
+                    if field in filter:
+                        used_index = idx_info.get("name")
+                        break
+            if used_index:
+                break
+        
         for record in self._data:
             if self._match_filter(filter, record):
                 found_records.append(record)
@@ -3926,6 +4198,9 @@ class JSONlite:
         # Cache the result
         if self._cache_enabled and find_all and self._cache:
             self._cache.set(filter, found_records)
+        
+        exec_time_ms = (time.perf_counter() - start_time) * 1000
+        self._query_planner.record_query(filter, exec_time_ms, len(found_records), used_index)
         
         return found_records
 
@@ -4131,6 +4406,43 @@ class JSONlite:
         """Reset cache statistics (hits/misses counters)."""
         if self._cache_enabled and self._cache:
             self._cache.reset_stats()
+    
+    # ==================== Query Planner ====================
+    
+    def get_query_stats(self) -> Dict[str, Any]:
+        """Get query planner statistics.
+        
+        Returns:
+            Dict with total_queries, optimized_queries, slow_queries,
+            unique_patterns, average_execution_time_ms, and top_fields.
+        
+        Example:
+            >>> stats = db.get_query_stats()
+            >>> print(f"Total queries: {stats['total_queries']}")
+            >>> print(f"Top fields: {stats['top_fields']}")
+        """
+        return self._query_planner.get_statistics()
+    
+    def suggest_indexes(self) -> List[Dict]:
+        """Suggest indexes based on query patterns.
+        
+        Analyzes query history and slow queries to recommend indexes
+        that could improve performance.
+        
+        Returns:
+            List of suggested index definitions with fields, name, and reason.
+        
+        Example:
+            >>> suggestions = db.suggest_indexes()
+            >>> for idx in suggestions:
+            ...     print(f"Create index on {idx['fields']}: {idx['reason']}")
+        """
+        existing = self._index_manager.list_indexes()
+        return self._query_planner.suggest_indexes(existing)
+    
+    def reset_query_stats(self) -> None:
+        """Reset query planner statistics."""
+        self._query_planner.reset()
     
     # ==================== Index Management ====================
     
@@ -4423,15 +4735,23 @@ class JSONlite:
     
     def _find_with_index(self, filter: Dict, find_all: bool = False) -> List[Dict]:
         """Find using indexes when possible for optimization."""
+        import time
+        start_time = time.perf_counter()
+        used_index = None
+        
         # Try cache first (only for find_all queries)
         if self._cache_enabled and find_all and self._cache:
             cached = self._cache.get(filter)
             if cached is not None:
+                exec_time_ms = (time.perf_counter() - start_time) * 1000
+                self._query_planner.record_query(filter, exec_time_ms, len(cached), "cache")
                 return cached
         
         # Check for geospatial queries and use geospatial index
         geospatial_result = self._try_geospatial_index_query(filter, find_all)
         if geospatial_result is not None:
+            exec_time_ms = (time.perf_counter() - start_time) * 1000
+            self._query_planner.record_query(filter, exec_time_ms, len(geospatial_result), "geospatial")
             return geospatial_result
         
         # Try to use index for simple equality filters
@@ -4447,6 +4767,8 @@ class JSONlite:
                     # Cache the result
                     if self._cache_enabled and find_all and self._cache:
                         self._cache.set(filter, result)
+                    exec_time_ms = (time.perf_counter() - start_time) * 1000
+                    self._query_planner.record_query(filter, exec_time_ms, len(result), f"idx_{field}")
                     return result
         
         # Fall back to full scan
@@ -4455,6 +4777,8 @@ class JSONlite:
             # Cache the result for empty filter queries
             if self._cache_enabled and find_all and self._cache:
                 self._cache.set(filter, result)
+            exec_time_ms = (time.perf_counter() - start_time) * 1000
+            self._query_planner.record_query(filter, exec_time_ms, len(result), None)
             return result
         
         found_records = []
@@ -4470,6 +4794,9 @@ class JSONlite:
         # Cache the result
         if self._cache_enabled and find_all and self._cache:
             self._cache.set(filter, sorted_results)
+        
+        exec_time_ms = (time.perf_counter() - start_time) * 1000
+        self._query_planner.record_query(filter, exec_time_ms, len(sorted_results), used_index)
         
         return sorted_results
     
