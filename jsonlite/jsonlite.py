@@ -1819,6 +1819,59 @@ class AggregationCursor:
         self._data = result
         return self
     
+    def _add_fields(self, field_spec: Dict) -> 'AggregationCursor':
+        """$addFields stage: add new computed fields to documents.
+        
+        MongoDB syntax:
+        {
+            $addFields: {
+                <newField>: <expression>,
+                ...
+            }
+        }
+        
+        This is equivalent to $project but preserves existing fields by default.
+        Supports all aggregation expressions including nested field paths.
+        
+        Args:
+            field_spec: Dictionary of new field names to expressions
+            
+        Example:
+            db.products.aggregate([
+                {"$addFields": {
+                    "totalPrice": {"$multiply": ["$price", "$quantity"]},
+                    "category": {"$toupper": "$category"},
+                    "inStock": {"$gt": ["$quantity", 0]}
+                }}
+            ])
+        """
+        new_data = []
+        
+        for doc in self._data:
+            new_doc = deepcopy(doc)  # Start with all existing fields
+            
+            # Add/compute new fields
+            for field_name, expression in field_spec.items():
+                if isinstance(expression, dict):
+                    # Expression - evaluate it
+                    new_doc[field_name] = self._eval_expr(expression, doc)
+                elif isinstance(expression, str) and expression.startswith('$'):
+                    # Field reference
+                    field_path = expression[1:]
+                    if '.' in field_path:
+                        # Dot notation - use _get_value_by_path
+                        new_doc[field_name] = self._db._get_value_by_path(doc, field_path)
+                    else:
+                        new_doc[field_name] = doc.get(field_path)
+                else:
+                    # Literal value
+                    new_doc[field_name] = expression
+            
+            new_data.append(new_doc)
+        
+        self._data = new_data
+        return self
+    
     def _get_value(self, val: Any, doc: Dict) -> Any:
         """Get value from field reference or literal, with recursive expression evaluation."""
         if isinstance(val, dict):
@@ -1845,19 +1898,30 @@ class AggregationCursor:
             if op == '$add':
                 total = 0
                 for item in val:
-                    total += self._get_value(item, doc) if not isinstance(item, (int, float)) else item
+                    v = self._get_value(item, doc) if not isinstance(item, (int, float)) else item
+                    if v is None:
+                        return None  # Propagate None
+                    total += v
                 return total
             
             elif op == '$subtract':
                 result = self._get_value(val[0], doc) if not isinstance(val[0], (int, float)) else val[0]
+                if result is None:
+                    return None
                 for item in val[1:]:
-                    result -= self._get_value(item, doc) if not isinstance(item, (int, float)) else item
+                    v = self._get_value(item, doc) if not isinstance(item, (int, float)) else item
+                    if v is None:
+                        return None  # Propagate None
+                    result -= v
                 return result
             
             elif op == '$multiply':
                 result = 1
                 for item in val:
-                    result *= self._get_value(item, doc) if not isinstance(item, (int, float)) else item
+                    v = self._get_value(item, doc) if not isinstance(item, (int, float)) else item
+                    if v is None:
+                        return None  # Propagate None
+                    result *= v
                 return result
             
             elif op == '$divide':
@@ -2690,6 +2754,8 @@ class AggregationCursor:
                     self._bucket(spec)
                 elif op == '$bucketAuto':
                     self._bucket_auto(spec)
+                elif op == '$addFields':
+                    self._add_fields(spec)
         return self
     
     def all(self) -> List[Dict]:
